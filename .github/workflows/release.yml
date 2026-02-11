@@ -30,6 +30,34 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
-          artifacts: "dist/*.dmg"
+          artifacts: "dist/*.dmg,dist/kaku_for_update.zip,dist/kaku_for_update.zip.sha256"
           token: ${{ secrets.GITHUB_TOKEN }}
           generateReleaseNotes: true
+
+      - name: Compute release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#V}"
+            version="${version#v}"
+          else
+            version="$(grep '^version =' kaku/Cargo.toml | head -n 1 | cut -d '"' -f2)"
+          fi
+
+          sha256="$(shasum -a 256 dist/Kaku.dmg | awk '{print $1}')"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch tap bump
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: tw93/homebrew-tap
+          event-type: kaku_release_published
+          client-payload: |
+            {"version":"${{ steps.meta.outputs.version }}","sha256":"${{ steps.meta.outputs.sha256 }}"}

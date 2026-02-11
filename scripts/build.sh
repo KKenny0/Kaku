@@ -84,7 +84,7 @@ fi
 APP_BUNDLE_SRC="assets/macos/Kaku.app"
 APP_BUNDLE_OUT="$OUT_DIR/$APP_NAME.app"
 
-echo "[1/6] Building binaries ($PROFILE, $BUILD_ARCH)..."
+echo "[1/7] Building binaries ($PROFILE, $BUILD_ARCH)..."
 PROFILE_DIR="debug"
 CARGO_PROFILE_ARGS=()
 if [[ "$PROFILE" == "release" ]]; then
@@ -132,7 +132,7 @@ for bin in kaku kaku-gui; do
 	lipo -info "$BIN_DIR/$bin"
 done
 
-echo "[2/6] Preparing app bundle..."
+echo "[2/7] Preparing app bundle..."
 rm -rf "$APP_BUNDLE_OUT"
 mkdir -p "$OUT_DIR"
 cp -R "$APP_BUNDLE_SRC" "$APP_BUNDLE_OUT"
@@ -146,7 +146,7 @@ fi
 mkdir -p "$APP_BUNDLE_OUT/Contents/MacOS"
 mkdir -p "$APP_BUNDLE_OUT/Contents/Resources"
 
-echo "[2.5/6] Syncing version from Cargo.toml..."
+echo "[2.5/7] Syncing version from Cargo.toml..."
 # Extract version from kaku/Cargo.toml (assuming it's the source of truth)
 VERSION=$(grep '^version =' kaku/Cargo.toml | head -n 1 | cut -d '"' -f2)
 if [[ -n "$VERSION" ]]; then
@@ -157,10 +157,10 @@ else
 	echo "Warning: Could not detect version from kaku/Cargo.toml"
 fi
 
-echo "[3/6] Downloading vendor dependencies..."
+echo "[3/7] Downloading vendor dependencies..."
 ./scripts/download_vendor.sh
 
-echo "[4/6] Copying resources and binaries..."
+echo "[4/7] Copying resources and binaries..."
 cp -R assets/shell-integration/* "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/shell-completion "$APP_BUNDLE_OUT/Contents/Resources/"
 cp -R assets/fonts "$APP_BUNDLE_OUT/Contents/Resources/"
@@ -184,14 +184,28 @@ done
 # Clean up xattrs to prevent icon caching issues or quarantine
 xattr -cr "$APP_BUNDLE_OUT"
 
-echo "[5/6] Signing app bundle..."
+echo "[5/7] Signing app bundle..."
 codesign --force --deep --sign - "$APP_BUNDLE_OUT"
 
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
 touch "$APP_BUNDLE_OUT"
 
-echo "[6/6] Creating DMG..."
+UPDATE_ZIP_NAME="kaku_for_update.zip"
+UPDATE_ZIP_PATH="$OUT_DIR/$UPDATE_ZIP_NAME"
+UPDATE_SHA_PATH="$OUT_DIR/${UPDATE_ZIP_NAME}.sha256"
+
+echo "[6/7] Creating auto-update archive..."
+rm -f "$UPDATE_ZIP_PATH" "$UPDATE_SHA_PATH"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE_OUT" "$UPDATE_ZIP_PATH"
+(
+	cd "$OUT_DIR"
+	/usr/bin/shasum -a 256 "$UPDATE_ZIP_NAME" >"$(basename "$UPDATE_SHA_PATH")"
+)
+echo "Update archive created: $UPDATE_ZIP_PATH"
+echo "Update checksum created: $UPDATE_SHA_PATH"
+
+echo "[7/7] Creating DMG..."
 DMG_NAME="$APP_NAME.dmg"
 DMG_PATH="$OUT_DIR/$DMG_NAME"
 DMG_BASE_PATH="$OUT_DIR/$APP_NAME"
