@@ -305,10 +305,11 @@ impl super::TermWindow {
                 .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
             self.current_mouse_capture = Some(MouseCapture::UI);
             self.is_window_dragging = true;
-            if !maximized {
+            if !maximized && !cfg!(target_os = "macos") {
                 self.window_drag_position.replace(event.clone());
             }
             context.request_drag_move();
+            return;
         } else if matches!(
             self.current_mouse_capture,
             None | Some(MouseCapture::TerminalPane(_))
@@ -328,7 +329,7 @@ impl super::TermWindow {
             );
         }
 
-        if prior_ui_item != ui_item {
+        if prior_ui_item != ui_item && !self.is_window_dragging {
             self.update_title_post_status();
         }
     }
@@ -574,8 +575,10 @@ impl super::TermWindow {
     ) {
         match event.kind {
             WMEK::Press(MousePress::Left) => match item {
-                TabBarItem::Tab { tab_idx, .. } => {
-                    self.activate_tab(tab_idx as isize).ok();
+                TabBarItem::Tab { tab_idx, active } => {
+                    if !active {
+                        self.activate_tab(tab_idx as isize).ok();
+                    }
                 }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Left);
@@ -599,7 +602,7 @@ impl super::TermWindow {
                     }
                     // Potentially starting a drag by the tab bar
                     self.is_window_dragging = true;
-                    if !maximized {
+                    if !maximized && !cfg!(target_os = "macos") {
                         self.window_drag_position.replace(event.clone());
                     }
                     context.request_drag_move();
