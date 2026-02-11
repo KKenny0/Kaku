@@ -5,7 +5,7 @@ use clap_complete::{generate as generate_completion, shells, Generator as Comple
 use config::{wezterm_version, ConfigHandle};
 use mux::Mux;
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{IsTerminal, Read, Write};
 use termwiz::caps::Capabilities;
 use termwiz::escape::esc::{Esc, EscCode};
 use termwiz::escape::OneBased;
@@ -18,6 +18,8 @@ use wezterm_gui_subcommands::*;
 
 mod asciicast;
 mod cli;
+mod config_cmd;
+mod init;
 mod update;
 
 //    let message = "; ❤ 😍🤢\n\x1b[91;mw00t\n\x1b[37;104;m bleet\x1b[0;m.";
@@ -134,6 +136,12 @@ enum SubCommand {
         about = "Download and install the latest Kaku release automatically"
     )]
     Update(update::UpdateCommand),
+
+    #[command(name = "config", about = "Open and edit user kaku.lua configuration")]
+    Config(config_cmd::ConfigCommand),
+
+    #[command(name = "init", about = "Initialize Kaku shell integration")]
+    Init(init::InitCommand),
 }
 
 use termwiz::escape::osc::{
@@ -729,12 +737,15 @@ fn run() -> anyhow::Result<()> {
 
     let opts = Opt::parse();
 
-    match opts
-        .cmd
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| SubCommand::Start(StartCommand::default()))
-    {
+    let cmd = if let Some(cmd) = opts.cmd.as_ref().cloned() {
+        cmd
+    } else if should_show_main_menu(&opts) {
+        select_main_menu_command()?
+    } else {
+        SubCommand::Start(StartCommand::default())
+    };
+
+    match cmd {
         SubCommand::Start(_) | SubCommand::BlockingStart(_) => delegate_to_gui(saver),
         SubCommand::ImageCat(cmd) => cmd.run(),
         SubCommand::SetCwd(cmd) => cmd.run(),
@@ -749,6 +760,62 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
         SubCommand::Update(cmd) => cmd.run(),
+        SubCommand::Config(cmd) => cmd.run(),
+        SubCommand::Init(cmd) => cmd.run(),
+    }
+}
+
+fn should_show_main_menu(opts: &Opt) -> bool {
+    opts.cmd.is_none()
+        && !opts.skip_config
+        && opts.config_file.is_none()
+        && opts.config_override.is_empty()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+}
+
+fn select_main_menu_command() -> anyhow::Result<SubCommand> {
+    const PURPLE_BOLD: &str = "\x1b[1;35m";
+    const BLUE: &str = "\x1b[34m";
+    const GRAY: &str = "\x1b[90m";
+    const RESET: &str = "\x1b[0m";
+
+    println!();
+    println!("{PURPLE_BOLD}  _  __      _          {RESET}");
+    println!("{PURPLE_BOLD} | |/ /     | |         {RESET}");
+    println!("{PURPLE_BOLD} | ' / __ _ | | __ _   _ {RESET}");
+    println!("{PURPLE_BOLD} |  < / _` || |/ /| | | |{RESET}");
+    println!("{PURPLE_BOLD} | . \\ (_| ||   < | |_| |{RESET}");
+    println!("{PURPLE_BOLD} |_|\\_\\__,_||_|\\_\\ \\__,_|{RESET}");
+    println!("  {BLUE}https://github.com/tw93/Kaku{RESET}");
+    println!("  {GRAY}A fast, out-of-the-box terminal built for AI coding.{RESET}");
+    println!();
+    println!("  1. config   Open ~/.config/kaku/kaku.lua");
+    println!("  2. update   Check and install latest version");
+    println!("  3. init     Initialize shell integration");
+    println!("  4. start    Launch Kaku GUI");
+    println!("  q. quit");
+    println!();
+
+    loop {
+        print!("Select option [1-4/q]: ");
+        std::io::stdout().flush().context("flush stdout")?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("read menu input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "1" | "config" => return Ok(SubCommand::Config(config_cmd::ConfigCommand::default())),
+            "2" | "update" => return Ok(SubCommand::Update(update::UpdateCommand::default())),
+            "3" | "init" => return Ok(SubCommand::Init(init::InitCommand::default())),
+            "4" | "start" => return Ok(SubCommand::Start(StartCommand::default())),
+            "q" | "quit" | "exit" => std::process::exit(0),
+            _ => {
+                println!("Invalid option. Enter 1, 2, 3, 4, or q.");
+            }
+        }
     }
 }
 
