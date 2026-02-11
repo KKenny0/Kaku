@@ -12,28 +12,29 @@ cd Kaku
 
 ```bash
 # Verify code
-cargo check
+make check
 
 # Run tests
-cargo test
+make test
+
+# Quick local build → dist/Kaku.app (debug, fastest)
+make app
 ```
 
 ## Build Release
 
 ```bash
-# Build application and DMG
+# Build application and DMG (release, native)
 ./scripts/build.sh
 # Outputs: dist/Kaku.app and dist/Kaku.dmg
 ```
 
 ## Pull Requests
 
-> **Important:** Please submit PRs to the `dev` branch, not `main`. We merge `dev` into `main` after testing.
-
-1. Fork and create branch from `dev`
+1. Fork and create a branch from `main`
 2. Make changes
-3. Run checks: `cargo check && cargo test`
+3. Run checks: `make check`
 4. Commit and push
-5. Open PR targeting `dev`
+5. Open PR targeting `main`
 
 CI will verify formatting, linting, and tests.

@@ -1,4 +1,4 @@
-.PHONY: all fmt build check test
+.PHONY: all fmt build app check test
 
 all: build
 
@@ -13,11 +13,11 @@ check:
 	cargo check -p wezterm-surface
 	cargo check -p wezterm-ssh
 
+app:
+	PROFILE=debug ./scripts/build.sh --app-only
+
 build:
-	cargo build $(BUILD_OPTS) -p kaku
-	cargo build $(BUILD_OPTS) -p kaku-gui
-	cargo build $(BUILD_OPTS) -p wezterm-mux-server
-	cargo build $(BUILD_OPTS) -p strip-ansi-escapes
+	cargo build $(BUILD_OPTS) -p kaku -p kaku-gui -p wezterm-mux-server-impl
 
 fmt:
 	cargo +nightly fmt

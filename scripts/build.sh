@@ -14,6 +14,7 @@ TARGET_DIR="${TARGET_DIR:-target}"
 PROFILE="${PROFILE:-release}"
 OUT_DIR="${OUT_DIR:-dist}"
 OPEN_APP="${OPEN_APP:-0}"
+APP_ONLY="${APP_ONLY:-0}"
 BUILD_ARCH="${BUILD_ARCH:-}"
 
 if [[ -z "$BUILD_ARCH" ]]; then
@@ -77,9 +78,12 @@ ensure_rust_targets() {
 	fi
 }
 
-if [[ "${1:-}" == "--open" ]]; then
-	OPEN_APP=1
-fi
+for arg in "$@"; do
+	case "$arg" in
+	--open) OPEN_APP=1 ;;
+	--app-only) APP_ONLY=1 ;;
+	esac
+done
 
 APP_BUNDLE_SRC="assets/macos/Kaku.app"
 APP_BUNDLE_OUT="$OUT_DIR/$APP_NAME.app"
@@ -110,7 +114,7 @@ ensure_rust_targets "${BUILD_TARGETS[@]}"
 
 for target in "${BUILD_TARGETS[@]}"; do
 	echo "Building target: $target"
-	cargo build "${CARGO_PROFILE_ARGS[@]}" --target "$target" --target-dir "$TARGET_DIR" -p kaku-gui -p kaku
+	cargo build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} --target "$target" --target-dir "$TARGET_DIR" -p kaku-gui -p kaku
 done
 
 if [[ "$BUILD_ARCH" == "universal" ]]; then
@@ -190,6 +194,12 @@ codesign --force --deep --sign - "$APP_BUNDLE_OUT"
 touch "$APP_BUNDLE_OUT/Contents/Resources/terminal.icns"
 touch "$APP_BUNDLE_OUT/Contents/Info.plist"
 touch "$APP_BUNDLE_OUT"
+
+if [[ "$APP_ONLY" == "1" ]]; then
+	echo "App bundle ready: $APP_BUNDLE_OUT"
+	if [[ "$OPEN_APP" == "1" ]]; then open "$APP_BUNDLE_OUT"; fi
+	exit 0
+fi
 
 UPDATE_ZIP_NAME="kaku_for_update.zip"
 UPDATE_ZIP_PATH="$OUT_DIR/$UPDATE_ZIP_NAME"
