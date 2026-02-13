@@ -85,11 +85,17 @@
 			<key>CFBundleTypeName</key>
 			<string>Folders</string>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
+			<string>Viewer</string>
 			<key>CFBundleTypeOSTypes</key>
 			<array>
 				<string>fold</string>
 			</array>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
