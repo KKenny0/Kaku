@@ -149,9 +149,17 @@ fn quote_path_for_clipboard_paste(
         // Clipboard file paste used to be POSIX-quoted before image support was added.
         // Keep that safety baseline for default SpacesOnly mode.
         config::DroppedFileQuoting::SpacesOnly | config::DroppedFileQuoting::Posix => {
-            shlex::try_quote(path.as_ref())
-                .unwrap_or_else(|_| "".into())
-                .into_owned()
+            let path_str = path.to_string();
+            match shlex::try_quote(&path_str) {
+                Ok(quoted) => quoted.into_owned(),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to quote path {:?} for clipboard paste: {}. Using as-is.",
+                        path_str, e
+                    );
+                    path_str
+                }
+            }
         }
         config::DroppedFileQuoting::Windows | config::DroppedFileQuoting::WindowsAlwaysQuoted => {
             quote_dropped_files.escape(path.as_ref())
