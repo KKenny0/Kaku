@@ -234,6 +234,11 @@ config.allow_square_glyphs_to_overflow_width = 'Always'
 config.custom_block_glyphs = true
 config.unicode_version = 14
 
+local _, in_app_bundle = wezterm.executable_dir:gsub('MacOS/?$', 'Resources')
+if in_app_bundle > 0 then
+  config.term = 'kaku'
+end
+
 -- ===== Cursor =====
 config.default_cursor_style = 'BlinkingBar'
 config.cursor_thickness = '2px'
