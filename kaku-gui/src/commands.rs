@@ -713,7 +713,7 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ToggleFullScreen => CommandDef {
             brief: "Toggle full screen mode".into(),
             doc: "Switch between normal and full screen mode".into(),
-            keys: vec![(Modifiers::ALT, "Return".into())],
+            keys: vec![],
             args: &[ArgType::ActiveWindow],
             menubar: &["View"],
             icon: Some("md_fullscreen"),
