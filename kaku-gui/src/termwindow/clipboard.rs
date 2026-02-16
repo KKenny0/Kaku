@@ -26,7 +26,9 @@ impl TermWindow {
         }
     }
 
-    /// Show toast notification with a message (disappears after 2.5 seconds)
+    /// Show toast notification with a message (disappears after 2.5 seconds).
+    /// Rapid consecutive calls are safe: each toast stores its creation `Instant`,
+    /// so only the matching toast is cleared — newer toasts naturally supersede older ones.
     pub fn show_toast(&mut self, message: String) {
         let now = Instant::now();
         self.toast = Some((now, message));
@@ -138,7 +140,7 @@ fn format_dropped_paths(
         .map(|path| quote_path_for_clipboard_paste(path, quote_dropped_files))
         .collect::<Vec<_>>()
         .join(" ")
-        + " "
+        + " " // Trailing space so the shell treats this as ready-to-append arguments.
 }
 
 fn quote_path_for_clipboard_paste(

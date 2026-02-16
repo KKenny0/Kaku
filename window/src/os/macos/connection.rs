@@ -101,6 +101,7 @@ impl SoftwareVersion {
 }
 
 const NO_ERR: i32 = 0;
+/// `kLSRolesAll` from LaunchServices — matches all handler roles.
 const KLS_ROLES_ALL: u32 = !0;
 const KAKU_BUNDLE_IDENTIFIER: &str = "fun.tw93.kaku";
 
@@ -280,6 +281,9 @@ impl ConnectionOps for Connection {
     }
 }
 
+// NOTE: LSSetDefaultRoleHandlerForContentType is deprecated since macOS 12 (Monterey).
+// It still works as of macOS 15 but may be removed in a future release.
+// Track https://developer.apple.com/documentation/coreservices for replacements.
 #[link(name = "CoreServices", kind = "framework")]
 extern "C" {
     fn LSSetDefaultRoleHandlerForContentType(

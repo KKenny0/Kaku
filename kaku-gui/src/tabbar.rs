@@ -233,6 +233,13 @@ fn build_default_title(
     TitleText { len, items }
 }
 
+/// Detect the SSH destination for a pane, used to show the remote host in tab titles.
+///
+/// Fallback chain (first match wins):
+///   1. `WEZTERM_PROG` user var → parse SSH command
+///   2. Domain name prefix (`SSH:` / `SSHMUX:`)
+///   3. Foreground process named `ssh` → parse its argv
+///   4. CWD host component (e.g. from `file://host/…`)
 fn ssh_destination_for_pane(pane: &PaneInformation) -> Option<String> {
     if let Some(command) = pane.user_vars.get("WEZTERM_PROG") {
         if let Some(host) = ssh_target_from_command(command) {
