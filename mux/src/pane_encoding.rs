@@ -412,4 +412,309 @@ mod tests {
         let text = decode_bytes_to_string(PaneEncoding::Gbk, &gbk_bytes);
         assert_eq!(text, "你好".to_string());
     }
+
+    #[test]
+    fn preserves_escape_sequences_all_encodings() {
+        let encodings = [
+            PaneEncoding::Gbk,
+            PaneEncoding::Gb18030,
+            PaneEncoding::Big5,
+            PaneEncoding::EucKr,
+            PaneEncoding::ShiftJis,
+        ];
+        let csi = b"\x1b[31m";
+        let osc = b"\x1b]0;title\x07";
+        let dcs = b"\x1bPpayload\x1b\\";
+        let csi_9b = [0x9b, b'3', b'1', b'm'];
+
+        for enc in encodings {
+            let mut decoder = PaneOutputDecoder::default();
+            assert_eq!(decoder.decode(enc, csi), csi.to_vec(), "{enc:?} CSI");
+            let mut decoder = PaneOutputDecoder::default();
+            assert_eq!(decoder.decode(enc, osc), osc.to_vec(), "{enc:?} OSC");
+            let mut decoder = PaneOutputDecoder::default();
+            assert_eq!(decoder.decode(enc, dcs), dcs.to_vec(), "{enc:?} DCS");
+            let mut decoder = PaneOutputDecoder::default();
+            assert_eq!(
+                decoder.decode(enc, &csi_9b),
+                csi_9b.to_vec(),
+                "{enc:?} CSI 0x9b"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_text_and_escape_all_encodings() {
+        // GBK: "你" = 0xc4e3, "好" = 0xbac3
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            let mut data = vec![0xc4, 0xe3];
+            data.extend_from_slice(b"\x1b[0m");
+            data.extend_from_slice(&[0xba, 0xc3]);
+            let result = decoder.decode(PaneEncoding::Gbk, &data);
+            let mut expected = "你".as_bytes().to_vec();
+            expected.extend_from_slice(b"\x1b[0m");
+            expected.extend_from_slice("好".as_bytes());
+            assert_eq!(result, expected, "GBK mixed");
+        }
+        // Big5: "你" = 0xa741, "好" = 0xa66e
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            let mut data = vec![0xa7, 0x41];
+            data.extend_from_slice(b"\x1b[0m");
+            data.extend_from_slice(&[0xa6, 0x6e]);
+            let result = decoder.decode(PaneEncoding::Big5, &data);
+            let mut expected = "你".as_bytes().to_vec();
+            expected.extend_from_slice(b"\x1b[0m");
+            expected.extend_from_slice("好".as_bytes());
+            assert_eq!(result, expected, "Big5 mixed");
+        }
+        // EUC-KR: "안" = 0xbec8, "녕" = 0xb3e7
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            let mut data = vec![0xbe, 0xc8];
+            data.extend_from_slice(b"\x1b[0m");
+            data.extend_from_slice(&[0xb3, 0xe7]);
+            let result = decoder.decode(PaneEncoding::EucKr, &data);
+            let mut expected = "안".as_bytes().to_vec();
+            expected.extend_from_slice(b"\x1b[0m");
+            expected.extend_from_slice("녕".as_bytes());
+            assert_eq!(result, expected, "EUC-KR mixed");
+        }
+        // Shift-JIS: "こ" = 0x82b1, "ん" = 0x82f1
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            let mut data = vec![0x82, 0xb1];
+            data.extend_from_slice(b"\x1b[0m");
+            data.extend_from_slice(&[0x82, 0xf1]);
+            let result = decoder.decode(PaneEncoding::ShiftJis, &data);
+            let mut expected = "こ".as_bytes().to_vec();
+            expected.extend_from_slice(b"\x1b[0m");
+            expected.extend_from_slice("ん".as_bytes());
+            assert_eq!(result, expected, "Shift-JIS mixed");
+        }
+        // GB18030: "你" = 0xc4e3, "好" = 0xbac3 (same as GBK for BMP)
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            let mut data = vec![0xc4, 0xe3];
+            data.extend_from_slice(b"\x1b[0m");
+            data.extend_from_slice(&[0xba, 0xc3]);
+            let result = decoder.decode(PaneEncoding::Gb18030, &data);
+            let mut expected = "你".as_bytes().to_vec();
+            expected.extend_from_slice(b"\x1b[0m");
+            expected.extend_from_slice("好".as_bytes());
+            assert_eq!(result, expected, "GB18030 mixed");
+        }
+    }
+
+    #[test]
+    fn split_multibyte_decode_all_encodings() {
+        // GBK: "你" = 0xc4 e3
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            assert!(decoder.decode(PaneEncoding::Gbk, &[0xc4]).is_empty());
+            assert_eq!(
+                decoder.decode(PaneEncoding::Gbk, &[0xe3]),
+                "你".as_bytes().to_vec()
+            );
+        }
+        // Big5: "你" = 0xa7 41
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            assert!(decoder.decode(PaneEncoding::Big5, &[0xa7]).is_empty());
+            assert_eq!(
+                decoder.decode(PaneEncoding::Big5, &[0x41]),
+                "你".as_bytes().to_vec()
+            );
+        }
+        // EUC-KR: "안" = 0xbe c8
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            assert!(decoder.decode(PaneEncoding::EucKr, &[0xbe]).is_empty());
+            assert_eq!(
+                decoder.decode(PaneEncoding::EucKr, &[0xc8]),
+                "안".as_bytes().to_vec()
+            );
+        }
+        // Shift-JIS: "こ" = 0x82 b1
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            assert!(decoder.decode(PaneEncoding::ShiftJis, &[0x82]).is_empty());
+            assert_eq!(
+                decoder.decode(PaneEncoding::ShiftJis, &[0xb1]),
+                "こ".as_bytes().to_vec()
+            );
+        }
+        // GB18030 2-byte: "你" = 0xc4 e3
+        {
+            let mut decoder = PaneOutputDecoder::default();
+            assert!(decoder.decode(PaneEncoding::Gb18030, &[0xc4]).is_empty());
+            assert_eq!(
+                decoder.decode(PaneEncoding::Gb18030, &[0xe3]),
+                "你".as_bytes().to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn split_multibyte_encode_all_encodings() {
+        // "你" in UTF-8 is 0xe4 0xbd 0xa0
+        // GBK: "你" = 0xc4 e3
+        {
+            let mut encoder = PaneInputEncoder::default();
+            assert!(encoder.encode(PaneEncoding::Gbk, &[0xe4]).is_empty());
+            assert_eq!(
+                encoder.encode(PaneEncoding::Gbk, &[0xbd, 0xa0]),
+                vec![0xc4, 0xe3]
+            );
+        }
+        // Big5: "你" = 0xa741
+        {
+            let mut encoder = PaneInputEncoder::default();
+            assert!(encoder.encode(PaneEncoding::Big5, &[0xe4]).is_empty());
+            assert_eq!(
+                encoder.encode(PaneEncoding::Big5, &[0xbd, 0xa0]),
+                vec![0xa7, 0x41]
+            );
+        }
+        // "안" in UTF-8 is 0xec 0x95 0x88
+        // EUC-KR: "안" = 0xbe c8
+        {
+            let mut encoder = PaneInputEncoder::default();
+            assert!(encoder.encode(PaneEncoding::EucKr, &[0xec]).is_empty());
+            assert_eq!(
+                encoder.encode(PaneEncoding::EucKr, &[0x95, 0x88]),
+                vec![0xbe, 0xc8]
+            );
+        }
+        // "こ" in UTF-8 is 0xe3 0x81 0x93
+        // Shift-JIS: "こ" = 0x82 b1
+        {
+            let mut encoder = PaneInputEncoder::default();
+            assert!(encoder.encode(PaneEncoding::ShiftJis, &[0xe3]).is_empty());
+            assert_eq!(
+                encoder.encode(PaneEncoding::ShiftJis, &[0x81, 0x93]),
+                vec![0x82, 0xb1]
+            );
+        }
+        // GB18030 2-byte: "你" = 0xc4 e3
+        {
+            let mut encoder = PaneInputEncoder::default();
+            assert!(encoder.encode(PaneEncoding::Gb18030, &[0xe4]).is_empty());
+            assert_eq!(
+                encoder.encode(PaneEncoding::Gb18030, &[0xbd, 0xa0]),
+                vec![0xc4, 0xe3]
+            );
+        }
+    }
+
+    #[test]
+    fn gb18030_four_byte_sequence() {
+        // U+20000 (𠀀) in GB18030 = 0x95 0x32 0x82 0x36
+        // In UTF-8: 0xf0 0xa0 0x80 0x80
+        let utf8_bytes = "\u{20000}".as_bytes();
+        let gb18030_bytes = [0x95, 0x32, 0x82, 0x36];
+
+        // Encode: UTF-8 → GB18030
+        let mut encoder = PaneInputEncoder::default();
+        let encoded = encoder.encode(PaneEncoding::Gb18030, utf8_bytes);
+        assert_eq!(encoded, gb18030_bytes.to_vec(), "GB18030 4-byte encode");
+
+        // Decode: GB18030 → UTF-8
+        let mut decoder = PaneOutputDecoder::default();
+        let decoded = decoder.decode(PaneEncoding::Gb18030, &gb18030_bytes);
+        assert_eq!(decoded, utf8_bytes.to_vec(), "GB18030 4-byte decode");
+
+        // Split decode: feed one byte at a time
+        let mut decoder = PaneOutputDecoder::default();
+        assert!(decoder.decode(PaneEncoding::Gb18030, &[0x95]).is_empty());
+        assert!(decoder.decode(PaneEncoding::Gb18030, &[0x32]).is_empty());
+        assert!(decoder.decode(PaneEncoding::Gb18030, &[0x82]).is_empty());
+        assert_eq!(
+            decoder.decode(PaneEncoding::Gb18030, &[0x36]),
+            utf8_bytes.to_vec(),
+            "GB18030 4-byte split decode"
+        );
+    }
+
+    #[test]
+    fn encoding_switch_resets_decoder_state() {
+        let mut decoder = PaneOutputDecoder::default();
+
+        // Start decoding GBK, feed first byte of a 2-byte char
+        let result1 = decoder.decode(PaneEncoding::Gbk, &[0xc4]);
+        assert!(result1.is_empty(), "GBK first byte buffered");
+
+        // Switch to Shift-JIS — should reset, not carry over partial GBK byte
+        let result2 = decoder.decode(PaneEncoding::ShiftJis, &[0x82, 0xb1]);
+        assert_eq!(result2, "こ".as_bytes().to_vec(), "Shift-JIS after switch");
+    }
+
+    #[test]
+    fn encoding_switch_resets_encoder_state() {
+        let mut encoder = PaneInputEncoder::default();
+
+        // Start encoding for GBK, feed first byte of "你" in UTF-8
+        let result1 = encoder.encode(PaneEncoding::Gbk, &[0xe4]);
+        assert!(result1.is_empty(), "GBK encoder first byte buffered");
+
+        // Switch to Shift-JIS — should reset pending UTF-8 bytes
+        let result2 = encoder.encode(PaneEncoding::ShiftJis, &[0xe3, 0x81, 0x93]);
+        assert_eq!(result2, vec![0x82, 0xb1], "Shift-JIS encode after switch");
+    }
+
+    #[test]
+    fn decode_bytes_to_string_all_encodings() {
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::Utf8, "hello世界".as_bytes()),
+            "hello世界"
+        );
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::Gbk, &[0xc4, 0xe3, 0xba, 0xc3]),
+            "你好"
+        );
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::Gb18030, &[0xc4, 0xe3, 0xba, 0xc3]),
+            "你好"
+        );
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::Big5, &[0xa7, 0x41, 0xa6, 0x6e]),
+            "你好"
+        );
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::EucKr, &[0xbe, 0xc8, 0xb3, 0xe7]),
+            "안녕"
+        );
+        assert_eq!(
+            decode_bytes_to_string(PaneEncoding::ShiftJis, &[0x82, 0xb1, 0x82, 0xf1]),
+            "こん"
+        );
+    }
+
+    #[test]
+    fn ascii_passthrough_all_encodings() {
+        let ascii = b"Hello, World! 123";
+        let encodings = [
+            PaneEncoding::Utf8,
+            PaneEncoding::Gbk,
+            PaneEncoding::Gb18030,
+            PaneEncoding::Big5,
+            PaneEncoding::EucKr,
+            PaneEncoding::ShiftJis,
+        ];
+        for enc in encodings {
+            let mut encoder = PaneInputEncoder::default();
+            let mut decoder = PaneOutputDecoder::default();
+            assert_eq!(
+                encoder.encode(enc, ascii),
+                ascii.to_vec(),
+                "{enc:?} encode ASCII"
+            );
+            assert_eq!(
+                decoder.decode(enc, ascii),
+                ascii.to_vec(),
+                "{enc:?} decode ASCII"
+            );
+        }
+    }
 }
