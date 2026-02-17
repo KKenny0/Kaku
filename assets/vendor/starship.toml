@@ -41,3 +41,6 @@ disabled = true
 
 [terraform]
 disabled = true
+
+[rust]
+format = "via [$symbol($version)]($style)"
