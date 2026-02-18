@@ -545,15 +545,13 @@ config.keys = {
       local panes = current_tab and current_tab:panes() or {}
       if #panes > 1 then
         win:perform_action(wezterm.action.CloseCurrentPane { confirm = false }, pane)
-      elseif #tabs > 1 then
-        win:perform_action(wezterm.action.CloseCurrentTab { confirm = false }, pane)
       else
-        local all_windows = wezterm.mux.all_windows()
-        if #all_windows > 1 then
+        local should_close_tab = (#tabs > 1) or (#wezterm.mux.all_windows() > 1)
+        if should_close_tab then
           win:perform_action(wezterm.action.CloseCurrentTab { confirm = false }, pane)
-        else
-          win:perform_action(wezterm.action.HideApplication, pane)
+          return
         end
+        win:perform_action(wezterm.action.HideApplication, pane)
       end
     end),
   },
