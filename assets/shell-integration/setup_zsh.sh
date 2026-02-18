@@ -306,6 +306,7 @@ ssh() {
             local has_identitiesonly=false prev=""
             for arg in "\$@"; do
                 [[ "\$prev" == "-o" && "\$arg" == IdentitiesOnly=* ]] && has_identitiesonly=true
+                [[ "\$arg" == -oIdentitiesOnly=* ]] && has_identitiesonly=true
                 prev="\$arg"
             done
             \$has_identitiesonly || extra_opts+=(-o "IdentitiesOnly=yes")

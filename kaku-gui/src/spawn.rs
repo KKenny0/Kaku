@@ -69,6 +69,8 @@ pub async fn spawn_command_internal(
             lossy_cwd
         }
     });
+    // Remember whether an encoding was explicitly requested before consuming the field.
+    let explicit_encoding = spawn.encoding.is_some();
     let encoding: PaneEncoding = spawn
         .encoding
         .unwrap_or_else(|| config::configuration().default_encoding);
@@ -123,7 +125,11 @@ pub async fn spawn_command_internal(
                     .await
                     .context("split_pane")?;
                 pane.set_config(term_config);
-                pane.set_encoding(encoding);
+                // Only override encoding when explicitly requested; otherwise the
+                // encoding inherited from the source pane by domain::split_pane stands.
+                if explicit_encoding {
+                    pane.set_encoding(encoding);
+                }
             } else {
                 bail!("there is no active tab while splitting pane!?");
             }
