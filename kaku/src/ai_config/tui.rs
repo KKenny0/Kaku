@@ -3,76 +3,13 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseEventKind,
 };
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Terminal;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use std::sync::LazyLock;
-
-struct Theme {
-    primary: Color,
-    secondary: Color,
-    accent: Color,
-    error: Color,
-    text: Color,
-    muted: Color,
-    bg: Color,
-    panel: Color,
-}
-
-fn parse_hex(hex: &str) -> Color {
-    let hex = hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-    Color::Rgb(r, g, b)
-}
-
-static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let json: serde_json::Value =
-        serde_json::from_str(super::OPENCODE_THEME_JSON).unwrap_or_default();
-    let defs = &json["defs"];
-    let hex =
-        |key: &str, fallback: &str| -> Color { parse_hex(defs[key].as_str().unwrap_or(fallback)) };
-    Theme {
-        primary: hex("primary", "#a277ff"),
-        secondary: hex("secondary", "#61ffca"),
-        accent: hex("accent", "#ffca85"),
-        error: hex("error", "#ff6767"),
-        text: hex("text", "#edecee"),
-        muted: hex("muted", "#6b6b6b"),
-        bg: hex("bg", "#15141b"),
-        panel: hex("element", "#1f1d28"),
-    }
-});
-
-macro_rules! define_colors {
-    ($($name:ident => $field:ident),* $(,)?) => {
-        $(
-            #[allow(non_snake_case)]
-            fn $name() -> Color { THEME.$field }
-        )*
-    }
-}
-
-define_colors! {
-    PURPLE => primary,
-    GREEN => secondary,
-    YELLOW => accent,
-    RED => error,
-    TEXT => text,
-    MUTED => muted,
-    BG => bg,
-    PANEL => panel,
-}
+mod ui;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
@@ -804,7 +741,15 @@ fn read_codex_reasoning_options() -> Vec<String> {
 fn extract_gemini_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
     let mut fields = Vec::new();
 
-    let model = json_str(val, "model");
+    let model = val
+        .get("model")
+        .and_then(|m| {
+            m.get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| m.as_str())
+        })
+        .unwrap_or("")
+        .to_string();
     let model_options = read_models_dev("google");
 
     let display_value = if model.is_empty() {
@@ -1290,6 +1235,7 @@ struct App {
     focus: Focus,
     editing: bool,
     edit_buf: String,
+    /// Byte offset into edit_buf; always on a char boundary.
     edit_cursor: usize,
     selecting: bool,
     select_index: usize,
@@ -1387,56 +1333,14 @@ impl App {
                 };
 
                 if let Some(auth_cmd) = cmd {
-                    // Execute auth command in a new Terminal window (macOS)
-                    let script = format!(
-                        "tell application \"Terminal\" to do script \"{}\"",
-                        auth_cmd
-                    );
-                    match std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(&script)
-                        .spawn()
-                    {
-                        Ok(_) => {
-                            self.status_msg =
-                                Some("Opening authentication in new terminal window...".into())
-                        }
-                        Err(_) => {
-                            self.status_msg = Some(format!(
-                                "Failed to open terminal. Run '{}' manually",
-                                auth_cmd
-                            ))
-                        }
-                    }
+                    self.open_in_terminal(auth_cmd);
                 } else {
                     self.status_msg = Some("OpenClaw uses API keys, check config file".to_string());
                 }
             } else if field.value.starts_with('✓') {
                 // OAuth provider in OpenCode auth.json (e.g., "openai", "google", "github-copilot")
-                let provider = field.key.as_str();
-                let auth_cmd = format!("opencode auth add {}", provider);
-
-                // Execute auth command in a new Terminal window (macOS)
-                let script = format!(
-                    "tell application \"Terminal\" to do script \"{}\"",
-                    auth_cmd
-                );
-                match std::process::Command::new("osascript")
-                    .arg("-e")
-                    .arg(&script)
-                    .spawn()
-                {
-                    Ok(_) => {
-                        self.status_msg =
-                            Some("Opening authentication in new terminal window...".into())
-                    }
-                    Err(_) => {
-                        self.status_msg = Some(format!(
-                            "Failed to open terminal. Run '{}' manually",
-                            auth_cmd
-                        ))
-                    }
-                }
+                let auth_cmd = format!("opencode auth add {}", field.key.as_str());
+                self.open_in_terminal(&auth_cmd);
             }
             return;
         }
@@ -1471,7 +1375,7 @@ impl App {
         } else {
             field.value.clone()
         };
-        self.edit_cursor = self.edit_buf.len(); // Start cursor at end
+        self.edit_cursor = self.edit_buf.len(); // Start cursor at end (always a valid byte boundary)
         self.focus = Focus::Editor;
     }
 
@@ -1584,9 +1488,46 @@ impl App {
             }
         }
     }
+
+    /// Open a shell command in a new Kaku tab (preferred) or fall back to Terminal.app.
+    fn open_in_terminal(&mut self, cmd: &str) {
+        // Prefer a new tab in the current Kaku window.
+        // kaku cli spawn reads WEZTERM_PANE from the environment to target the right window.
+        // Append `exec $SHELL` so the pane stays alive after the command finishes.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell_cmd = format!("{}; exec \"{}\"", cmd, shell);
+        let kaku_status = std::process::Command::new("kaku")
+            .args(["cli", "spawn", "--", &shell, "-c", &shell_cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if kaku_status.as_ref().is_ok_and(|status| status.success()) {
+            self.status_msg = Some("Opening in new Kaku tab...".into());
+            return;
+        }
+
+        // Fallback: open in macOS Terminal.app via osascript.
+        let script = format!("tell application \"Terminal\" to do script \"{}\"", cmd);
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .spawn()
+        {
+            Ok(_) => self.status_msg = Some("Opening in new terminal window...".into()),
+            Err(_) => {
+                self.status_msg = Some(format!("Failed to open terminal. Run '{}' manually", cmd))
+            }
+        }
+    }
 }
 
 fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> {
+    // Codex uses TOML; delegate immediately before any JSON parsing attempt.
+    if tool == Tool::Codex {
+        return save_codex_field(field_key, new_val);
+    }
+
     let path = tool.config_path();
     if !path.exists() {
         anyhow::bail!("config file not found: {}", path.display());
@@ -1598,21 +1539,21 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
         .with_context(|| format!("parse {}", path.display()))?;
 
     match tool {
-        Tool::Codex => return save_codex_field(field_key, new_val),
         Tool::Gemini => {
-            let top_key = match field_key {
-                "Model" => Some("model"),
-                _ => None,
-            };
-            if let Some(tk) = top_key {
+            if field_key == "Model" {
                 if let Some(obj) = parsed.as_object_mut() {
                     if new_val == "—" || new_val.is_empty() {
-                        obj.remove(tk);
+                        obj.remove("model");
                     } else {
-                        obj.insert(
-                            tk.to_string(),
-                            serde_json::Value::String(new_val.to_string()),
-                        );
+                        let keep_string_shape = obj.get("model").is_some_and(|m| m.is_string());
+                        if keep_string_shape {
+                            obj.insert(
+                                "model".to_string(),
+                                serde_json::Value::String(new_val.to_string()),
+                            );
+                        } else {
+                            obj.insert("model".to_string(), serde_json::json!({"name": new_val}));
+                        }
                     }
                 }
             } else {
@@ -1620,17 +1561,13 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
             }
         }
         Tool::Copilot => {
-            let top_key = match field_key {
-                "Model" => Some("model"),
-                _ => None,
-            };
-            if let Some(tk) = top_key {
+            if field_key == "Model" {
                 if let Some(obj) = parsed.as_object_mut() {
                     if new_val == "—" || new_val.is_empty() {
-                        obj.remove(tk);
+                        obj.remove("model");
                     } else {
                         obj.insert(
-                            tk.to_string(),
+                            "model".to_string(),
                             serde_json::Value::String(new_val.to_string()),
                         );
                     }
@@ -1892,6 +1829,7 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
                 return Ok(());
             }
         }
+        Tool::Codex => unreachable!("Codex is handled before JSON parsing"),
     }
 
     let output = serde_json::to_string_pretty(&parsed).context("serialize config")?;
@@ -1902,15 +1840,19 @@ fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> 
 
 /// Save a field to Codex TOML config (~/.codex/config.toml)
 fn save_codex_field(field_key: &str, new_val: &str) -> anyhow::Result<()> {
+    let path = Tool::Codex.config_path();
+    save_codex_field_at(&path, field_key, new_val)
+}
+
+fn save_codex_field_at(path: &Path, field_key: &str, new_val: &str) -> anyhow::Result<()> {
     let toml_key = match field_key {
         "Model" => "model",
         "Reasoning Effort" => "model_reasoning_effort",
         _ => return Ok(()),
     };
 
-    let path = Tool::Codex.config_path();
     let raw = if path.exists() {
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
     } else {
         String::new()
     };
@@ -1944,16 +1886,14 @@ fn save_codex_field(field_key: &str, new_val: &str) -> anyhow::Result<()> {
     // Remove empty lines that resulted from deletion
     let output: Vec<&str> = lines.iter().map(|l| l.as_str()).collect();
     let result = output.join("\n");
-    std::fs::write(&path, result.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(path, result.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alternate screen")?;
+    crossterm::execute!(stdout, EnableMouseCapture).context("enable mouse capture")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
@@ -1961,12 +1901,8 @@ pub fn run() -> anyhow::Result<()> {
     let result = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode().context("disable raw mode")?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )
-    .context("leave alternate screen")?;
+    crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)
+        .context("disable mouse capture")?;
     terminal.show_cursor().context("show cursor")?;
 
     result
@@ -1977,7 +1913,7 @@ fn run_loop(
     app: &mut App,
 ) -> anyhow::Result<()> {
     loop {
-        terminal.draw(|frame| ui(frame, app))?;
+        terminal.draw(|frame| ui::ui(frame, app))?;
 
         match event::read().context("read event")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -2007,12 +1943,14 @@ fn run_loop(
                         KeyCode::Esc => app.cancel_edit(),
                         KeyCode::Left => {
                             if app.edit_cursor > 0 {
-                                app.edit_cursor -= 1;
+                                app.edit_cursor =
+                                    prev_char_boundary(&app.edit_buf, app.edit_cursor);
                             }
                         }
                         KeyCode::Right => {
                             if app.edit_cursor < app.edit_buf.len() {
-                                app.edit_cursor += 1;
+                                app.edit_cursor =
+                                    next_char_boundary(&app.edit_buf, app.edit_cursor);
                             }
                         }
                         KeyCode::Home => {
@@ -2029,14 +1967,12 @@ fn run_loop(
                                 app.edit_buf.clear();
                                 app.edit_cursor = 0;
                             } else if app.edit_cursor > 0 {
-                                // Regular backspace - delete char before cursor
-                                app.edit_buf.remove(app.edit_cursor - 1);
-                                app.edit_cursor -= 1;
+                                edit_backspace(&mut app.edit_buf, &mut app.edit_cursor);
                             }
                         }
                         KeyCode::Delete => {
                             if app.edit_cursor < app.edit_buf.len() {
-                                app.edit_buf.remove(app.edit_cursor);
+                                edit_delete(&mut app.edit_buf, app.edit_cursor);
                             }
                         }
                         KeyCode::Char(c) => {
@@ -2052,9 +1988,7 @@ fn run_loop(
                             else if !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::SUPER)
                             {
-                                // Insert char at cursor position
-                                app.edit_buf.insert(app.edit_cursor, c);
-                                app.edit_cursor += 1;
+                                edit_insert_char(&mut app.edit_buf, &mut app.edit_cursor, c);
                             }
                         }
                         _ => {}
@@ -2089,304 +2023,120 @@ fn run_loop(
     }
 }
 
-fn ui(frame: &mut ratatui::Frame, app: &mut App) {
-    let area = frame.area();
-
-    // Fill background
-    frame.render_widget(Block::default().style(Style::default().bg(BG())), area);
-
-    let chunks = Layout::vertical([
-        Constraint::Length(2), // logo header
-        Constraint::Min(4),    // tool list
-        Constraint::Length(1), // status bar
-    ])
-    .split(area);
-
-    render_header(frame, chunks[0]);
-    render_tools(frame, chunks[1], app);
-    render_status_bar(frame, chunks[2], app);
-
-    if app.selecting {
-        render_selector(frame, area, app);
-    } else if app.editing {
-        render_editor(frame, area, app);
+fn prev_char_boundary(buf: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(buf.len());
+    if cursor == 0 {
+        return 0;
     }
+    buf[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
-fn render_header(frame: &mut ratatui::Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled(
-            "  Kaku",
-            Style::default().fg(PURPLE()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" · ", Style::default().fg(MUTED())),
-        Span::styled("AI Config", Style::default().fg(TEXT())),
-    ]);
-    frame.render_widget(Paragraph::new(vec![line, Line::from("")]), area);
-}
-
-fn render_tools(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let mut items: Vec<ListItem> = Vec::new();
-    let mut selected_flat: Option<usize> = None;
-    let mut flat = 0usize;
-
-    for (ti, tool) in app.tools.iter().enumerate() {
-        let is_current_tool = ti == app.tool_index;
-        let path_str = tool.tool.config_path().display().to_string();
-        let home = config::HOME_DIR.display().to_string();
-        let short_path = path_str.replace(&home, "~");
-
-        let tool_style = if tool.installed {
-            Style::default().fg(GREEN()).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(MUTED())
-        };
-
-        let header = Line::from(vec![
-            Span::styled(
-                if is_current_tool { "▸ " } else { "  " },
-                Style::default().fg(PURPLE()),
-            ),
-            Span::styled(tool.tool.label(), tool_style),
-            Span::styled("  ", Style::default()),
-            Span::styled(short_path, Style::default().fg(MUTED())),
-            if !tool.installed {
-                Span::styled("  (not installed)", Style::default().fg(MUTED()))
-            } else {
-                Span::raw("")
-            },
-        ]);
-        items.push(ListItem::new(header));
-        flat += 1;
-
-        for (fi, field) in tool.fields.iter().enumerate() {
-            let is_selected = is_current_tool && fi == app.field_index;
-            if is_selected {
-                selected_flat = Some(flat);
-            }
-
-            let marker = if is_selected { "▸" } else { "├" };
-            let last = fi == tool.fields.len() - 1;
-            let connector = if last && !is_selected { "└" } else { marker };
-
-            let val_color = if field.value.starts_with('✓') {
-                GREEN()
-            } else if field.value.starts_with('✗') {
-                RED()
-            } else if field.value == "—" {
-                MUTED()
-            } else {
-                YELLOW()
-            };
-
-            // Detect sub-fields (keys with " ▸ ") for hierarchical display
-            let (display_key, extra_indent) = if let Some(pos) = field.key.find(" ▸ ") {
-                (format!("▸ {}", &field.key[pos + " ▸ ".len()..]), true)
-            } else {
-                (field.key.clone(), false)
-            };
-
-            let indent_str = if extra_indent { "    │  " } else { "    " };
-            let key_width = if extra_indent { 21 } else { 24 };
-
-            // Prefix: ✓/✗ already present for auth, › for editable, · for read-only
-            let val_prefix = if field.value.starts_with('✓') || field.value.starts_with('✗') {
-                ""
-            } else if field.editable {
-                "› "
-            } else {
-                "· "
-            };
-
-            let line = Line::from(vec![
-                Span::styled(indent_str, Style::default().fg(MUTED())),
-                Span::styled(
-                    connector,
-                    Style::default().fg(if is_selected { PURPLE() } else { MUTED() }),
-                ),
-                Span::styled(
-                    "─ ",
-                    Style::default().fg(if is_selected { PURPLE() } else { MUTED() }),
-                ),
-                Span::styled(
-                    format!("{:<width$}", display_key, width = key_width),
-                    Style::default().fg(TEXT()),
-                ),
-                Span::styled(val_prefix, Style::default().fg(val_color)),
-                Span::styled(&field.value, Style::default().fg(val_color)),
-            ]);
-
-            items.push(ListItem::new(line));
-            flat += 1;
-        }
-
-        items.push(ListItem::new(Line::raw("")));
-        flat += 1;
+fn next_char_boundary(buf: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(buf.len());
+    if cursor >= buf.len() {
+        return buf.len();
     }
-
-    let mut state = ListState::default();
-    state.select(selected_flat);
-
-    let list = List::new(items).highlight_style(Style::default().bg(PANEL()));
-
-    frame.render_stateful_widget(list, area, &mut state);
+    cursor + buf[cursor..].chars().next().map_or(0, |c| c.len_utf8())
 }
 
-fn render_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let status = if let Some(msg) = &app.status_msg {
-        Line::from(vec![
-            Span::styled(" ℹ ", Style::default().fg(GREEN())),
-            Span::styled(msg.as_str(), Style::default().fg(TEXT())),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(" ↑↓", Style::default().fg(PURPLE())),
-            Span::styled(" Navigate  ", Style::default().fg(MUTED())),
-            Span::styled("Enter", Style::default().fg(PURPLE())),
-            Span::styled(" Edit  ", Style::default().fg(MUTED())),
-            Span::styled("Shift", Style::default().fg(PURPLE())),
-            Span::styled(" Select/Copy  ", Style::default().fg(MUTED())),
-            Span::styled("o", Style::default().fg(PURPLE())),
-            Span::styled(" Open File  ", Style::default().fg(MUTED())),
-            Span::styled("r", Style::default().fg(PURPLE())),
-            Span::styled(" Refresh  ", Style::default().fg(MUTED())),
-            Span::styled("q", Style::default().fg(PURPLE())),
-            Span::styled(" Quit", Style::default().fg(MUTED())),
-        ])
-    };
-
-    frame.render_widget(Paragraph::new(status), area);
-}
-
-fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let tool = &app.tools[app.tool_index];
-    if app.field_index >= tool.fields.len() {
+fn edit_backspace(buf: &mut String, cursor: &mut usize) {
+    if *cursor == 0 || buf.is_empty() {
         return;
     }
-    let field = &tool.fields[app.field_index];
-
-    // Compact popup - 80% width, fixed height (~3 lines of content + borders)
-    let popup_width = ((area.width as f32 * 0.8) as u16).min(area.width.saturating_sub(4));
-    let popup_height = 5u16.min(area.height.saturating_sub(4));
-    let popup = Rect::new(
-        (area.width.saturating_sub(popup_width)) / 2,
-        (area.height.saturating_sub(popup_height)) / 2,
-        popup_width,
-        popup_height,
-    );
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled(" Edit: ", Style::default().fg(PURPLE())),
-            Span::styled(&field.key, Style::default().fg(TEXT())),
-            Span::styled("  ", Style::default()),
-            Span::styled("Enter", Style::default().fg(PURPLE())),
-            Span::styled(": Save  ", Style::default().fg(MUTED())),
-            Span::styled("Esc", Style::default().fg(PURPLE())),
-            Span::styled(": Cancel ", Style::default().fg(MUTED())),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(PURPLE()))
-        .style(Style::default().bg(BG()));
-
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    // Wrap long text to multiple lines for better visibility
-    let content_area = inner.inner(Margin::new(1, 0));
-
-    // Build line with cursor at the correct position
-    let line = if app.edit_buf.is_empty() {
-        // Empty buffer - show a space with inverted background as cursor
-        Line::from(Span::styled(" ", Style::default().bg(PURPLE())))
-    } else {
-        let cursor_pos = app.edit_cursor;
-        let before = &app.edit_buf[..cursor_pos];
-        let after = &app.edit_buf[cursor_pos..];
-
-        if cursor_pos >= app.edit_buf.len() {
-            // Cursor at end - show space with inverted background
-            Line::from(vec![
-                Span::styled(before, Style::default().fg(TEXT())),
-                Span::styled(" ", Style::default().bg(PURPLE())),
-            ])
-        } else {
-            // Cursor in middle - highlight current character with inverted colors
-            let mut chars = after.chars();
-            let current_char = chars.next().unwrap_or(' ');
-            let remaining = chars.as_str();
-
-            Line::from(vec![
-                Span::styled(before, Style::default().fg(TEXT())),
-                Span::styled(
-                    current_char.to_string(),
-                    Style::default().bg(PURPLE()).fg(BG()),
-                ),
-                Span::styled(remaining, Style::default().fg(TEXT())),
-            ])
-        }
-    };
-
-    let input = Paragraph::new(vec![line]).wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(input, content_area);
+    let prev = prev_char_boundary(buf, *cursor);
+    buf.remove(prev);
+    *cursor = prev;
 }
 
-fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let tool = &app.tools[app.tool_index];
-    if app.field_index >= tool.fields.len() {
+fn edit_delete(buf: &mut String, cursor: usize) {
+    if cursor >= buf.len() || buf.is_empty() {
         return;
     }
-    let field = &tool.fields[app.field_index];
+    buf.remove(cursor);
+}
 
-    let option_count = app.select_options.len() as u16;
-    let popup_width = 60u16.min(area.width.saturating_sub(4));
-    let popup_height = (option_count + 2).min(area.height.saturating_sub(4));
-    let popup = Rect::new(
-        (area.width.saturating_sub(popup_width)) / 2,
-        (area.height.saturating_sub(popup_height)) / 2,
-        popup_width,
-        popup_height,
-    );
+fn edit_insert_char(buf: &mut String, cursor: &mut usize, c: char) {
+    let at = (*cursor).min(buf.len());
+    buf.insert(at, c);
+    *cursor = at + c.len_utf8();
+}
 
-    frame.render_widget(Clear, popup);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
 
-    let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled(" Select: ", Style::default().fg(PURPLE())),
-            Span::styled(&field.key, Style::default().fg(TEXT())),
-            Span::raw(" "),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(PURPLE()))
-        .style(Style::default().bg(BG()));
+    #[test]
+    fn codex_save_round_trip_for_model_and_reasoning_effort() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
 
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+        std::fs::write(
+            &path,
+            "model = \"old\"\nmodel_reasoning_effort = \"low\"\n\n[projects.\"/tmp\"]\ntrust_level = \"trusted\"\n",
+        )
+        .expect("seed config");
 
-    let items: Vec<ListItem> = app
-        .select_options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let is_sel = i == app.select_index;
-            let marker = if is_sel { "▸ " } else { "  " };
-            let style = if is_sel {
-                Style::default().fg(PURPLE()).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(TEXT())
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(PURPLE())),
-                Span::styled(opt.as_str(), style),
-            ]))
-        })
-        .collect();
+        save_codex_field_at(&path, "Model", "gpt-5").expect("update model");
+        save_codex_field_at(&path, "Reasoning Effort", "high").expect("update effort");
+        let saved = std::fs::read_to_string(&path).expect("read config");
+        assert!(saved.contains("model = \"gpt-5\""));
+        assert!(saved.contains("model_reasoning_effort = \"high\""));
+        assert!(saved.contains("[projects.\"/tmp\"]"));
 
-    let mut state = ListState::default();
-    state.select(Some(app.select_index));
+        save_codex_field_at(&path, "Model", "").expect("remove model");
+        let saved = std::fs::read_to_string(&path).expect("read config");
+        assert!(!saved.contains("model = \"gpt-5\""));
+        assert!(saved.contains("model_reasoning_effort = \"high\""));
+        assert!(saved.contains("[projects.\"/tmp\"]"));
+    }
 
-    let list = List::new(items).highlight_style(Style::default().bg(PANEL()));
-    frame.render_stateful_widget(list, inner, &mut state);
+    #[test]
+    fn codex_save_creates_new_top_level_entry_before_sections() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[profiles.default]\nfoo = \"bar\"\n").expect("seed config");
+
+        save_codex_field_at(&path, "Model", "gpt-5").expect("insert model");
+        let saved = std::fs::read_to_string(&path).expect("read config");
+        let model_pos = saved.find("model = \"gpt-5\"").expect("model line");
+        let section_pos = saved.find("[profiles.default]").expect("section");
+        assert!(model_pos < section_pos);
+    }
+
+    #[test]
+    fn unicode_edit_helpers_keep_cursor_on_char_boundaries() {
+        let mut buf = "你a好".to_string();
+        let mut cursor = buf.len();
+
+        cursor = prev_char_boundary(&buf, cursor);
+        assert_eq!(cursor, "你a".len());
+        cursor = prev_char_boundary(&buf, cursor);
+        assert_eq!(cursor, "你".len());
+        cursor = prev_char_boundary(&buf, cursor);
+        assert_eq!(cursor, 0);
+
+        cursor = next_char_boundary(&buf, cursor);
+        assert_eq!(cursor, "你".len());
+        cursor = next_char_boundary(&buf, cursor);
+        assert_eq!(cursor, "你a".len());
+
+        edit_insert_char(&mut buf, &mut cursor, '界');
+        assert_eq!(buf, "你a界好");
+        assert_eq!(cursor, "你a界".len());
+
+        edit_backspace(&mut buf, &mut cursor);
+        assert_eq!(buf, "你a好");
+        assert_eq!(cursor, "你a".len());
+
+        cursor = prev_char_boundary(&buf, cursor);
+        assert_eq!(cursor, "你".len());
+        edit_delete(&mut buf, cursor);
+        assert_eq!(buf, "你好");
+        assert_eq!(cursor, "你".len());
+    }
 }
