@@ -468,18 +468,20 @@ impl crate::TermWindow {
 
     /// Render the toast notification
     pub fn paint_toast(&mut self) -> anyhow::Result<()> {
-        let (toast_at, message) = match &self.toast {
-            Some((t, msg)) if t.elapsed() < Duration::from_millis(2500) => (*t, msg.clone()),
+        let (toast_at, message, lifetime) = match &self.toast {
+            Some((t, msg, lifetime)) if t.elapsed() < *lifetime => (*t, msg.clone(), *lifetime),
             _ => return Ok(()),
         };
 
         let font = self.fonts.title_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
 
-        // Fade out during the last 500ms (after 2000ms)
+        // Fade out during the last 500ms of the configured lifetime.
         let elapsed_ms = toast_at.elapsed().as_millis() as f32;
-        let alpha = if elapsed_ms > 2000.0 {
-            (1.0 - (elapsed_ms - 2000.0) / 500.0).max(0.0)
+        let lifetime_ms = lifetime.as_millis() as f32;
+        let fade_start_ms = (lifetime_ms - 500.0).max(0.0);
+        let alpha = if elapsed_ms > fade_start_ms {
+            (1.0 - (elapsed_ms - fade_start_ms) / 500.0).max(0.0)
         } else {
             1.0
         };
@@ -545,7 +547,7 @@ impl crate::TermWindow {
         self.render_element(&computed, gl_state, None)?;
 
         // Keep redrawing during fade-out
-        if elapsed_ms > 2000.0 {
+        if elapsed_ms > fade_start_ms {
             let next = Instant::now() + Duration::from_millis(16);
             let mut anim = self.has_animation.borrow_mut();
             match *anim {

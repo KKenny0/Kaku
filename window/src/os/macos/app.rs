@@ -49,10 +49,7 @@ done
     match Command::new("/bin/sh").arg("-c").arg(SCRIPT).status() {
         Ok(status) if status.success() => {}
         Ok(status) => {
-            log::debug!(
-                "reap_kaku_autofill_helpers exited with status {}",
-                status
-            );
+            log::debug!("reap_kaku_autofill_helpers exited with status {}", status);
         }
         Err(err) => {
             log::warn!("reap_kaku_autofill_helpers failed: {err:#}");

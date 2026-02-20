@@ -91,6 +91,38 @@ use prevcursor::PrevCursorPos;
 
 const ATLAS_SIZE: usize = 128;
 
+fn decode_hex_event_payload(payload: &str) -> Option<String> {
+    if payload.is_empty() || payload.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(payload.len() / 2);
+    let chars: Vec<char> = payload.chars().collect();
+    for i in (0..chars.len()).step_by(2) {
+        let hi = chars[i].to_digit(16)?;
+        let lo = chars[i + 1].to_digit(16)?;
+        bytes.push(((hi << 4) | lo) as u8);
+    }
+
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn ai_toast_lifetime_ms(message: &str) -> u64 {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("checking")
+        || lower.contains("analy")
+        || lower.contains("fail")
+        || lower.contains("error")
+        || lower.contains("missing")
+        || lower.contains("unavailable")
+        || lower.contains("not found")
+    {
+        3000
+    } else {
+        2000
+    }
+}
+
 lazy_static::lazy_static! {
     static ref WINDOW_CLASS: Mutex<String> = Mutex::new(wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS.to_owned());
     static ref POSITION: Mutex<Option<GuiPosition>> = Mutex::new(None);
@@ -587,8 +619,8 @@ pub struct TermWindow {
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
 
-    /// Toast notification: (start_time, message)
-    toast: Option<(Instant, String)>,
+    /// Toast notification: (start_time, message, lifetime)
+    toast: Option<(Instant, String, Duration)>,
 }
 
 impl TermWindow {
@@ -3081,6 +3113,37 @@ impl TermWindow {
                     self.show_toast("Lazygit not found. Run kaku init".to_string());
                 } else if name == "kaku-toast-lazygit-dispatch-failed" {
                     self.show_toast("Lazygit: Dispatch failed".to_string());
+                } else if name == "kaku-toast-ai-analyzing" {
+                    let message = "Kaku AI checking error".to_string();
+                    self.show_ai_progress_toast(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-ready" {
+                    let message = "AI fix ready. Press Cmd+Shift+E".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-unavailable" {
+                    let message = "AI fix unavailable".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-missing-key" {
+                    let message = "Run kaku auto to set up AI.".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-applied" {
+                    // No notification on successful apply; command output is enough.
+                } else if name == "kaku-toast-ai-no-pane" {
+                    let message = "No active pane".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-no-suggestion" {
+                    let message = "No executable suggestion".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-send-failed" {
+                    let message = "Failed to apply suggestion".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if name == "kaku-toast-ai-info" {
+                    let message = "Kaku AI update".to_string();
+                    self.show_ai_result_notice(message.clone(), ai_toast_lifetime_ms(&message));
+                } else if let Some(payload) = name.strip_prefix("kaku-toast-ai-") {
+                    if let Some(message) = decode_hex_event_payload(payload) {
+                        let lifetime = ai_toast_lifetime_ms(&message);
+                        self.show_ai_result_notice(message, lifetime);
+                    }
                 } else if name == "open-kaku-config" {
                     crate::frontend::open_kaku_config();
                 } else if name == crate::frontend::SET_DEFAULT_TERMINAL_EVENT {

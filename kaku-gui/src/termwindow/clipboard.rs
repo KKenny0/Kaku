@@ -4,10 +4,38 @@ use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
 use mux::Mux;
 use smol::Timer;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use wezterm_toast_notification::persistent_toast_notification;
 use window::{Clipboard, ClipboardData, WindowOps};
+
+const AI_NOTICE_DEDUP_WINDOW: Duration = Duration::from_secs(2);
+const AI_NOTICE_CACHE_RETENTION: Duration = Duration::from_secs(30);
+
+lazy_static::lazy_static! {
+    static ref AI_NOTICE_TIMESTAMPS: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+}
+
+fn should_emit_ai_notice(kind: &str, message: &str) -> bool {
+    let key = format!("{kind}:{message}");
+    let now = Instant::now();
+    let mut guard = match AI_NOTICE_TIMESTAMPS.lock() {
+        Ok(guard) => guard,
+        Err(_) => return true,
+    };
+
+    if let Some(last_seen) = guard.get(&key) {
+        if now.duration_since(*last_seen) < AI_NOTICE_DEDUP_WINDOW {
+            return false;
+        }
+    }
+
+    guard.insert(key, now);
+    guard.retain(|_, ts| now.duration_since(*ts) <= AI_NOTICE_CACHE_RETENTION);
+    true
+}
 
 impl TermWindow {
     pub fn copy_to_clipboard(&self, clipboard: ClipboardCopyDestination, text: String) {
@@ -26,26 +54,24 @@ impl TermWindow {
         }
     }
 
-    /// Show toast notification with a message (disappears after 2.5 seconds).
-    /// Rapid consecutive calls are safe: each toast stores its creation `Instant`,
-    /// so only the matching toast is cleared — newer toasts naturally supersede older ones.
-    pub fn show_toast(&mut self, message: String) {
+    fn show_toast_internal(&mut self, message: String, lifetime: Duration) {
         let now = Instant::now();
-        self.toast = Some((now, message));
+        let fade_after = lifetime.saturating_sub(Duration::from_millis(500));
+        self.toast = Some((now, message, lifetime));
         if let Some(window) = self.window.clone() {
             let win = window.clone();
-            // Trigger fade-out after 2000ms
+            // Trigger fade-out during the last 500ms.
             let fade_win = win.clone();
             promise::spawn::spawn(async move {
-                Timer::after(Duration::from_millis(2000)).await;
+                Timer::after(fade_after).await;
                 fade_win.invalidate();
             })
             .detach();
-            // Clear after 2500ms
+            // Clear when lifetime expires.
             promise::spawn::spawn(async move {
-                Timer::after(Duration::from_millis(2500)).await;
+                Timer::after(lifetime).await;
                 window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
-                    if let Some((toast_time, _)) = &tw.toast {
+                    if let Some((toast_time, _, _)) = &tw.toast {
                         if *toast_time == now {
                             tw.toast = None;
                         }
@@ -58,6 +84,54 @@ impl TermWindow {
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }
+    }
+
+    /// Show toast notification with a message (disappears after 2.5 seconds).
+    /// Rapid consecutive calls are safe: each toast stores its creation `Instant`,
+    /// so only the matching toast is cleared — newer toasts naturally supersede older ones.
+    pub fn show_toast(&mut self, message: String) {
+        self.show_toast_internal(message, Duration::from_millis(2500));
+    }
+
+    /// Show toast notification with a custom lifetime in milliseconds.
+    pub fn show_toast_for(&mut self, message: String, lifetime_ms: u64) {
+        let clamped = lifetime_ms.clamp(800, 15000);
+        self.show_toast_internal(message, Duration::from_millis(clamped));
+    }
+
+    /// Progress hints should stay local to the terminal surface and auto-dismiss.
+    pub fn show_ai_progress_toast(&mut self, message: String, lifetime_ms: u64) {
+        let normalized = message.trim().to_string();
+        if normalized.is_empty() {
+            return;
+        }
+        if !self.window_state.can_paint() {
+            return;
+        }
+        if !should_emit_ai_notice("progress", &normalized) {
+            return;
+        }
+        let clamped = lifetime_ms.clamp(1200, 8000);
+        self.show_toast_internal(normalized, Duration::from_millis(clamped));
+    }
+
+    /// Result notices prefer in-window toast when the window is focused;
+    /// fallback to system notification when in background/hidden.
+    pub fn show_ai_result_notice(&mut self, message: String, lifetime_ms: u64) {
+        let normalized = message.trim().to_string();
+        if normalized.is_empty() {
+            return;
+        }
+        if !should_emit_ai_notice("result", &normalized) {
+            return;
+        }
+
+        let show_in_window = self.focused.is_some() && self.window_state.can_paint();
+        if show_in_window {
+            self.show_toast_for(normalized, lifetime_ms);
+            return;
+        }
+        persistent_toast_notification("Kaku AI", &normalized);
     }
 
     /// Show "Copied" toast notification
