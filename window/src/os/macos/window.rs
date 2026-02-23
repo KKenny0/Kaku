@@ -2667,11 +2667,48 @@ fn get_window_class() -> &'static Class {
 }
 
 impl WindowView {
+    fn cancel_pending_perform_requests(view: *mut Object) {
+        unsafe {
+            let _: () = msg_send![
+                class!(NSObject),
+                cancelPreviousPerformRequestsWithTarget: view
+                selector: sel!(kakuPersistWindowStateAfterMove:)
+                object: nil
+            ];
+            let _: () = msg_send![
+                class!(NSObject),
+                cancelPreviousPerformRequestsWithTarget: view
+                selector: sel!(windowDidResize:)
+                object: nil
+            ];
+        }
+    }
+
     extern "C" fn dealloc(this: &mut Object, _sel: Sel) {
+        Self::cancel_pending_perform_requests(this as *mut Object);
+        Self::detach_backing_layer(this);
         Self::drop_inner(this);
         unsafe {
             let superclass = superclass(this);
             let () = msg_send![super(this, superclass), dealloc];
+        }
+    }
+
+    fn detach_backing_layer(view: &mut Object) {
+        unsafe {
+            // On newer macOS builds we can crash in QuartzCore while the app is
+            // quitting and CoreAnimation is tearing down the layer tree. Clear
+            // the delegate and sublayers while the view is still valid so that
+            // CA doesn't touch stale pointers during the final transaction
+            // flush.
+            let layer: id = msg_send![view, layer];
+            if layer.is_null() {
+                return;
+            }
+
+            let _: () = msg_send![layer, removeAllAnimations];
+            let _: () = msg_send![layer, setDelegate: nil];
+            let _: () = msg_send![layer, setSublayers: nil];
         }
     }
 
@@ -3060,14 +3097,8 @@ impl WindowView {
     }
 
     extern "C" fn window_will_close(this: &mut Object, _sel: Sel, _id: id) {
-        unsafe {
-            let _: () = msg_send![
-                class!(NSObject),
-                cancelPreviousPerformRequestsWithTarget: this as *mut Object
-                selector: sel!(kakuPersistWindowStateAfterMove:)
-                object: nil
-            ];
-        }
+        Self::cancel_pending_perform_requests(this as *mut Object);
+        Self::detach_backing_layer(this);
         if let Some(this) = Self::get_this(this) {
             let conn = Connection::get().unwrap();
             if !APP_TERMINATING.load(Ordering::Relaxed) {
