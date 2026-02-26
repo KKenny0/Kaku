@@ -15,6 +15,7 @@ pub(super) struct Theme {
 pub(super) fn parse_hex(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
+        log::warn!("ai theme parse_hex: invalid color '{hex}', fallback to #000000");
         return Color::Rgb(0, 0, 0);
     }
 
@@ -30,12 +31,16 @@ pub(super) fn parse_hex(hex: &str) -> Color {
         .get(4..6)
         .and_then(|s| u8::from_str_radix(s, 16).ok())
         .unwrap_or(0);
+    if r == 0 && g == 0 && b == 0 && !hex.eq_ignore_ascii_case("000000") {
+        log::warn!("ai theme parse_hex: invalid color '{hex}', fallback to #000000");
+    }
     Color::Rgb(r, g, b)
 }
 
 pub(super) static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let json: serde_json::Value =
-        serde_json::from_str(super::OPENCODE_THEME_JSON).unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_str(super::OPENCODE_THEME_JSON)
+        .map_err(|e| log::warn!("ai theme parse: invalid OPENCODE_THEME_JSON: {}", e))
+        .unwrap_or_default();
     let defs = &json["defs"];
     let hex =
         |key: &str, fallback: &str| -> Color { parse_hex(defs[key].as_str().unwrap_or(fallback)) };

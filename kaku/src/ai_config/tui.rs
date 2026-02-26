@@ -10,6 +10,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 mod ui;
 
@@ -92,6 +94,37 @@ const FACTORY_DROID_DEFAULT_AUTONOMY: &str = "normal";
 const FACTORY_DROID_REASONING_OPTIONS: [&str; 5] = ["off", "none", "low", "medium", "high"];
 const FACTORY_DROID_AUTONOMY_OPTIONS: [&str; 5] =
     ["normal", "spec", "auto-low", "auto-medium", "auto-high"];
+const UI_ERROR_TTL: Duration = Duration::from_secs(5);
+
+static UI_ERRORS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+fn ui_errors() -> &'static Mutex<Vec<String>> {
+    UI_ERRORS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn push_ui_error(message: impl Into<String>) {
+    let message = message.into();
+    let mut guard = match ui_errors().lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    if guard.last().is_some_and(|last| last == &message) {
+        return;
+    }
+    if guard.len() >= 8 {
+        guard.remove(0);
+    }
+    guard.push(message);
+}
+
+fn pop_ui_error() -> Option<String> {
+    let mut guard = ui_errors().lock().ok()?;
+    if guard.is_empty() {
+        None
+    } else {
+        Some(guard.remove(0))
+    }
+}
 
 struct FieldEntry {
     key: String,
@@ -180,7 +213,7 @@ impl ToolState {
                 extract_copilot_fields(&parsed)
             }
             Tool::FactoryDroid => {
-                let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                let parsed = parse_json_with_debug(&raw, tool.label());
                 extract_factory_droid_fields(&parsed)
             }
             Tool::OpenCode => {
@@ -203,16 +236,89 @@ impl ToolState {
 
 fn parse_json_with_debug(raw: &str, tool_label: &str) -> serde_json::Value {
     serde_json::from_str(raw).unwrap_or_else(|e| {
-        log::debug!("failed to parse {} config json: {}", tool_label, e);
+        log::warn!("failed to parse {} config json: {}", tool_label, e);
+        push_ui_error(format!("{tool_label} config is invalid JSON"));
         serde_json::Value::Null
     })
 }
 
 fn parse_json_or_jsonc_with_debug(raw: &str, tool_label: &str) -> serde_json::Value {
     parse_json_or_jsonc(raw).unwrap_or_else(|e| {
-        log::debug!("failed to parse {} config json/jsonc: {}", tool_label, e);
+        log::warn!("failed to parse {} config json/jsonc: {}", tool_label, e);
+        push_ui_error(format!("{tool_label} config is malformed"));
         serde_json::Value::Null
     })
+}
+
+fn read_text_with_debug(path: &Path, context: &str) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Some(raw),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            log::debug!("{context}: {} not found", path.display());
+            None
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidData
+            ) =>
+        {
+            log::warn!("{context}: failed to read {}: {}", path.display(), e);
+            push_ui_error(format!(
+                "{context}: cannot read {}. Check file permission or encoding.",
+                path.display()
+            ));
+            None
+        }
+        Err(e) => {
+            log::debug!("{context}: failed to read {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+fn parse_json_value_with_debug(raw: &str, context: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(raw)
+        .map_err(|e| {
+            log::warn!("{context}: failed to parse json: {}", e);
+            push_ui_error(format!("{context}: invalid JSON format"));
+        })
+        .ok()
+}
+
+fn read_json_file_with_debug(path: &Path, context: &str) -> Option<serde_json::Value> {
+    let raw = read_text_with_debug(path, context)?;
+    parse_json_value_with_debug(&raw, context)
+}
+
+fn decode_jwt_payload_with_debug(token: &str, context: &str) -> Option<serde_json::Value> {
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        log::debug!("{context}: invalid jwt format");
+        push_ui_error(format!("{context}: invalid token format"));
+        return None;
+    }
+
+    let mut payload = parts[1].to_string();
+    while payload.len() % 4 != 0 {
+        payload.push('=');
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(&payload)
+        .map_err(|e| {
+            log::debug!("{context}: failed to decode jwt payload: {}", e);
+            push_ui_error(format!("{context}: token payload decode failed"));
+        })
+        .ok()?;
+    serde_json::from_slice(&decoded)
+        .map_err(|e| {
+            log::debug!("{context}: failed to parse jwt payload json: {}", e);
+            push_ui_error(format!("{context}: token payload JSON is invalid"));
+        })
+        .ok()
 }
 
 fn json_str(val: &serde_json::Value, key: &str) -> String {
@@ -333,9 +439,11 @@ impl Default for KakuAssistantConfig {
 /// This function gracefully handles malformed TOML by using default values
 /// for any missing or invalid fields.
 fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
-    let parsed = raw
-        .parse::<toml::Value>()
-        .unwrap_or_else(|_| toml::Value::Table(Default::default()));
+    let parsed = raw.parse::<toml::Value>().unwrap_or_else(|e| {
+        log::warn!("failed to parse assistant.toml: {}", e);
+        push_ui_error("Kaku Assistant config TOML is malformed");
+        toml::Value::Table(Default::default())
+    });
 
     let enabled = parsed
         .get("enabled")
@@ -441,7 +549,33 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
 
 fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<()> {
     let path = assistant_config::ensure_assistant_toml_exists()?;
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            log::debug!(
+                "assistant config missing when saving; recreating {}",
+                path.display()
+            );
+            String::new()
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidData
+            ) =>
+        {
+            log::warn!("failed to read assistant config {}: {}", path.display(), e);
+            push_ui_error(format!(
+                "cannot read {}. Check file permission or encoding.",
+                path.display()
+            ));
+            String::new()
+        }
+        Err(e) => {
+            log::debug!("failed to read assistant config {}: {}", path.display(), e);
+            String::new()
+        }
+    };
     let cfg = parse_kaku_assistant_config(&raw);
 
     // Build updated config based on which field changed
@@ -481,24 +615,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
 /// Get OpenAI account email from JWT token in auth.json
 fn get_opencode_openai_account(entry: &serde_json::Value) -> Option<String> {
     let token = entry.get("access")?.as_str()?;
-
-    // JWT format: header.payload.signature
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    // Base64 URL-safe decode payload (add padding if needed)
-    let mut payload = parts[1].to_string();
-    while payload.len() % 4 != 0 {
-        payload.push('=');
-    }
-
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::URL_SAFE
-        .decode(&payload)
-        .ok()?;
-    let jwt_data: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let jwt_data = decode_jwt_payload_with_debug(token, "opencode openai account")?;
 
     // OpenAI JWT payload contains email in custom claim
     jwt_data
@@ -524,8 +641,7 @@ fn get_opencode_google_account(entry: &serde_json::Value) -> Option<String> {
         .join("opencode")
         .join("antigravity-accounts.json");
 
-    let raw = std::fs::read_to_string(&accounts_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let parsed = read_json_file_with_debug(&accounts_path, "opencode google account")?;
 
     // Find account with matching project ID
     let accounts = parsed.get("accounts")?.as_array()?;
@@ -549,8 +665,7 @@ fn get_gemini_account() -> Option<String> {
         .join(".gemini")
         .join("google_accounts.json");
 
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let parsed = read_json_file_with_debug(&path, "gemini account")?;
 
     // Extract "active" field
     parsed.get("active")?.as_str().map(|s| s.to_string())
@@ -559,29 +674,12 @@ fn get_gemini_account() -> Option<String> {
 /// Get Codex account email from JWT token in auth.json
 fn get_codex_account() -> Option<String> {
     let auth_path = config::HOME_DIR.join(".codex").join("auth.json");
-    let raw = std::fs::read_to_string(&auth_path).ok()?;
-    let auth_json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let auth_json = read_json_file_with_debug(&auth_path, "codex account")?;
 
     // Extract access_token from tokens object
     let token = auth_json.get("tokens")?.get("access_token")?.as_str()?;
 
-    // JWT format: header.payload.signature
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    // Base64 URL-safe decode payload (add padding if needed)
-    let mut payload = parts[1].to_string();
-    while payload.len() % 4 != 0 {
-        payload.push('=');
-    }
-
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::URL_SAFE
-        .decode(&payload)
-        .ok()?;
-    let jwt_data: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let jwt_data = decode_jwt_payload_with_debug(token, "codex account")?;
 
     // OpenAI JWT payload contains email in custom claim
     jwt_data
@@ -599,8 +697,7 @@ fn get_opencode_api_key(provider_name: &str) -> Option<String> {
         .join("opencode")
         .join("auth.json");
 
-    let raw = std::fs::read_to_string(&auth_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let parsed = read_json_file_with_debug(&auth_path, "opencode api key")?;
 
     parsed
         .get(provider_name)?
@@ -692,8 +789,8 @@ fn load_models_dev_json() -> Option<serde_json::Value> {
     let cache_path = cache_dir.join("models.json");
 
     // Use cache if exists
-    if let Ok(raw) = std::fs::read_to_string(&cache_path) {
-        if let Ok(v) = serde_json::from_str(&raw) {
+    if let Some(raw) = read_text_with_debug(&cache_path, "models.dev cache") {
+        if let Some(v) = parse_json_value_with_debug(&raw, "models.dev cache") {
             return Some(v);
         }
     }
@@ -916,18 +1013,16 @@ fn extract_codex_fields(raw: &str) -> Vec<FieldEntry> {
 
     // Check auth status from auth.json
     let auth_path = config::HOME_DIR.join(".codex").join("auth.json");
-    if let Ok(auth_raw) = std::fs::read_to_string(&auth_path) {
-        if let Ok(auth) = serde_json::from_str::<serde_json::Value>(&auth_raw) {
-            let auth_mode = auth.get("auth_mode").and_then(|v| v.as_str()).unwrap_or("");
-            if !auth_mode.is_empty() {
-                let account = get_codex_account();
-                fields.push(FieldEntry {
-                    key: "Auth".into(),
-                    value: format_auth_status(account, auth_mode),
-                    options: vec![],
-                    editable: false,
-                });
-            }
+    if let Some(auth) = read_json_file_with_debug(&auth_path, "codex auth status") {
+        let auth_mode = auth.get("auth_mode").and_then(|v| v.as_str()).unwrap_or("");
+        if !auth_mode.is_empty() {
+            let account = get_codex_account();
+            fields.push(FieldEntry {
+                key: "Auth".into(),
+                value: format_auth_status(account, auth_mode),
+                options: vec![],
+                editable: false,
+            });
         }
     }
 
@@ -937,32 +1032,30 @@ fn extract_codex_fields(raw: &str) -> Vec<FieldEntry> {
 /// Read model slugs from Codex's own cache, or from models.dev.
 fn read_codex_model_options() -> Vec<String> {
     let cache_path = config::HOME_DIR.join(".codex").join("models_cache.json");
-    if let Ok(raw) = std::fs::read_to_string(&cache_path) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-            let mut models: Vec<(String, usize)> = parsed
-                .get("models")
-                .and_then(|m| m.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|m| {
-                            m.get("visibility")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v == "list")
-                                .unwrap_or(false)
-                        })
-                        .filter_map(|m| {
-                            let slug = m.get("slug").and_then(|v| v.as_str())?;
-                            let priority =
-                                m.get("priority").and_then(|v| v.as_u64()).unwrap_or(999) as usize;
-                            Some((slug.to_string(), priority))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !models.is_empty() {
-                models.sort_by_key(|(_, p)| *p);
-                return models.into_iter().map(|(s, _)| s).collect();
-            }
+    if let Some(parsed) = read_json_file_with_debug(&cache_path, "codex model cache") {
+        let mut models: Vec<(String, usize)> = parsed
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|m| {
+                        m.get("visibility")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v == "list")
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|m| {
+                        let slug = m.get("slug").and_then(|v| v.as_str())?;
+                        let priority =
+                            m.get("priority").and_then(|v| v.as_u64()).unwrap_or(999) as usize;
+                        Some((slug.to_string(), priority))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !models.is_empty() {
+            models.sort_by_key(|(_, p)| *p);
+            return models.into_iter().map(|(s, _)| s).collect();
         }
     }
 
@@ -972,8 +1065,7 @@ fn read_codex_model_options() -> Vec<String> {
 /// Read reasoning effort options from Codex's models cache for the current model.
 fn read_codex_reasoning_options() -> Vec<String> {
     let config_path = config::HOME_DIR.join(".codex").join("config.toml");
-    let current_model = std::fs::read_to_string(&config_path)
-        .ok()
+    let current_model = read_text_with_debug(&config_path, "codex config")
         .and_then(|raw| {
             raw.lines()
                 .find(|l| l.trim_start().starts_with("model"))
@@ -983,35 +1075,33 @@ fn read_codex_reasoning_options() -> Vec<String> {
         .unwrap_or_default();
 
     let cache_path = config::HOME_DIR.join(".codex").join("models_cache.json");
-    if let Ok(raw) = std::fs::read_to_string(&cache_path) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(models) = parsed.get("models").and_then(|m| m.as_array()) {
-                // Find the current model or first visible model
-                let model = models
-                    .iter()
-                    .find(|m| m.get("slug").and_then(|v| v.as_str()) == Some(&current_model))
-                    .or_else(|| {
-                        models
-                            .iter()
-                            .find(|m| m.get("visibility").and_then(|v| v.as_str()) == Some("list"))
-                    });
+    if let Some(parsed) = read_json_file_with_debug(&cache_path, "codex model cache") {
+        if let Some(models) = parsed.get("models").and_then(|m| m.as_array()) {
+            // Find the current model or first visible model
+            let model = models
+                .iter()
+                .find(|m| m.get("slug").and_then(|v| v.as_str()) == Some(&current_model))
+                .or_else(|| {
+                    models
+                        .iter()
+                        .find(|m| m.get("visibility").and_then(|v| v.as_str()) == Some("list"))
+                });
 
-                if let Some(m) = model {
-                    if let Some(levels) = m
-                        .get("supported_reasoning_levels")
-                        .and_then(|l| l.as_array())
-                    {
-                        let opts: Vec<String> = levels
-                            .iter()
-                            .filter_map(|l| {
-                                l.get("effort")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .collect();
-                        if !opts.is_empty() {
-                            return opts;
-                        }
+            if let Some(m) = model {
+                if let Some(levels) = m
+                    .get("supported_reasoning_levels")
+                    .and_then(|l| l.as_array())
+                {
+                    let opts: Vec<String> = levels
+                        .iter()
+                        .filter_map(|l| {
+                            l.get("effort")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    if !opts.is_empty() {
+                        return opts;
                     }
                 }
             }
@@ -1073,27 +1163,45 @@ fn extract_gemini_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
 
 /// Read model choices from `copilot --help` output, fallback to models.dev.
 fn read_copilot_model_options() -> Vec<String> {
-    if let Ok(output) = std::process::Command::new("copilot").arg("--help").output() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        // Find "--model" first, then parse the choices after it
-        if let Some(model_pos) = text.find("--model") {
-            let after_model = &text[model_pos..];
-            if let Some(choices_pos) = after_model.find("choices:") {
-                let rest = &after_model[choices_pos + "choices:".len()..];
-                if let Some(end) = rest.find(')') {
-                    let choices_str = &rest[..end];
-                    let models: Vec<String> = choices_str
-                        .split(',')
-                        .map(|s| s.trim().trim_matches('"').trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !models.is_empty() {
-                        return models;
-                    }
+    let output = match std::process::Command::new("copilot").arg("--help").output() {
+        Ok(output) => output,
+        Err(e) => {
+            log::debug!("copilot --help probe failed to launch: {}", e);
+            return read_models_dev("anthropic");
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!(
+            "copilot --help probe failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+        return read_models_dev("anthropic");
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Find "--model" first, then parse the choices after it
+    if let Some(model_pos) = text.find("--model") {
+        let after_model = &text[model_pos..];
+        if let Some(choices_pos) = after_model.find("choices:") {
+            let rest = &after_model[choices_pos + "choices:".len()..];
+            if let Some(end) = rest.find(')') {
+                let choices_str = &rest[..end];
+                let models: Vec<String> = choices_str
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !models.is_empty() {
+                    return models;
                 }
             }
         }
     }
+
+    log::debug!("copilot --help output did not expose model choices");
     read_models_dev("anthropic")
 }
 
@@ -1248,20 +1356,18 @@ fn extract_opencode_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
             .join("share")
             .join("opencode")
             .join("auth.json");
-        if let Ok(auth_raw) = std::fs::read_to_string(&auth_path) {
-            if let Ok(auth) = serde_json::from_str::<serde_json::Value>(&auth_raw) {
-                if let Some(obj) = auth.as_object() {
-                    for auth_name in obj.keys() {
-                        // Map well-known aliases, otherwise use auth name directly
-                        let models_dev_id = match auth_name.as_str() {
-                            "github-copilot" => "anthropic",
-                            other => other,
-                        };
-                        for model in read_models_dev(models_dev_id) {
-                            let prefixed = format!("{}/{}", auth_name, model);
-                            if !model_options.contains(&prefixed) {
-                                model_options.push(prefixed);
-                            }
+        if let Some(auth) = read_json_file_with_debug(&auth_path, "opencode auth providers") {
+            if let Some(obj) = auth.as_object() {
+                for auth_name in obj.keys() {
+                    // Map well-known aliases, otherwise use auth name directly
+                    let models_dev_id = match auth_name.as_str() {
+                        "github-copilot" => "anthropic",
+                        other => other,
+                    };
+                    for model in read_models_dev(models_dev_id) {
+                        let prefixed = format!("{}/{}", auth_name, model);
+                        if !model_options.contains(&prefixed) {
+                            model_options.push(prefixed);
                         }
                     }
                 }
@@ -1288,57 +1394,55 @@ fn extract_opencode_fields(val: &serde_json::Value) -> Vec<FieldEntry> {
         .join("share")
         .join("opencode")
         .join("auth.json");
-    if let Ok(auth_raw) = std::fs::read_to_string(&auth_path) {
-        if let Ok(auth) = serde_json::from_str::<serde_json::Value>(&auth_raw) {
-            if let Some(obj) = auth.as_object() {
-                // Sort: well-known providers first, then rest alphabetically
-                let priority = |name: &str| -> usize {
-                    match name {
-                        n if n.contains("claude") || n.contains("anthropic") => 0,
-                        "openai" => 1,
-                        "google" => 2,
-                        "github-copilot" => 3,
-                        _ => 4,
-                    }
-                };
-                let mut entries: Vec<_> = obj.iter().collect();
-                entries.sort_by(|(a, _), (b, _)| {
-                    let pa = priority(a);
-                    let pb = priority(b);
-                    pa.cmp(&pb).then_with(|| a.cmp(b))
-                });
-
-                for (name, entry) in entries {
-                    let auth_type = entry
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let status = match auth_type.as_str() {
-                        "api" => {
-                            let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                            format!("✓ {}", mask_key(key))
-                        }
-                        "oauth" => {
-                            let account = match name.as_str() {
-                                "openai" => get_opencode_openai_account(entry),
-                                "google" => get_opencode_google_account(entry),
-                                "github-copilot" => get_opencode_github_copilot_account(),
-                                _ => None,
-                            };
-                            format_auth_status(account, "oauth")
-                        }
-                        _ => auth_type.clone(),
-                    };
-
-                    fields.push(FieldEntry {
-                        key: name.clone(),
-                        value: status,
-                        options: vec![],
-                        editable: auth_type == "api", // API keys are editable, OAuth is not
-                    });
+    if let Some(auth) = read_json_file_with_debug(&auth_path, "opencode auth status") {
+        if let Some(obj) = auth.as_object() {
+            // Sort: well-known providers first, then rest alphabetically
+            let priority = |name: &str| -> usize {
+                match name {
+                    n if n.contains("claude") || n.contains("anthropic") => 0,
+                    "openai" => 1,
+                    "google" => 2,
+                    "github-copilot" => 3,
+                    _ => 4,
                 }
+            };
+            let mut entries: Vec<_> = obj.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| {
+                let pa = priority(a);
+                let pb = priority(b);
+                pa.cmp(&pb).then_with(|| a.cmp(b))
+            });
+
+            for (name, entry) in entries {
+                let auth_type = entry
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let status = match auth_type.as_str() {
+                    "api" => {
+                        let key = entry.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("✓ {}", mask_key(key))
+                    }
+                    "oauth" => {
+                        let account = match name.as_str() {
+                            "openai" => get_opencode_openai_account(entry),
+                            "google" => get_opencode_google_account(entry),
+                            "github-copilot" => get_opencode_github_copilot_account(),
+                            _ => None,
+                        };
+                        format_auth_status(account, "oauth")
+                    }
+                    _ => auth_type.clone(),
+                };
+
+                fields.push(FieldEntry {
+                    key: name.clone(),
+                    value: status,
+                    options: vec![],
+                    editable: auth_type == "api", // API keys are editable, OAuth is not
+                });
             }
         }
     }
@@ -1604,19 +1708,30 @@ enum Focus {
     Editor,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum AppMode {
+    Browsing,
+    Editing {
+        field_idx: usize,
+        buffer: String,
+        cursor: usize,
+    },
+    Selecting {
+        field_idx: usize,
+        options: Vec<String>,
+        selected: usize,
+    },
+}
+
 struct App {
     tools: Vec<ToolState>,
     tool_index: usize,
     field_index: usize,
     focus: Focus,
-    editing: bool,
-    edit_buf: String,
-    /// Byte offset into edit_buf; always on a char boundary.
-    edit_cursor: usize,
-    selecting: bool,
-    select_index: usize,
-    select_options: Vec<String>,
+    mode: AppMode,
     status_msg: Option<String>,
+    last_error: Option<String>,
+    error_expire: Option<Instant>,
     should_quit: bool,
 }
 
@@ -1635,20 +1750,19 @@ impl App {
     fn new() -> Self {
         let tools: Vec<ToolState> = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
         let first = tools.iter().position(|t| !t.fields.is_empty()).unwrap_or(0);
-        App {
+        let mut app = App {
             tools,
             tool_index: first,
             field_index: 0,
             focus: Focus::ToolList,
-            editing: false,
-            edit_buf: String::new(),
-            edit_cursor: 0,
-            selecting: false,
-            select_index: 0,
-            select_options: Vec::new(),
+            mode: AppMode::Browsing,
             status_msg: None,
+            last_error: None,
+            error_expire: None,
             should_quit: false,
-        }
+        };
+        app.sync_transient_errors();
+        app
     }
 
     fn total_rows(&self) -> usize {
@@ -1664,6 +1778,62 @@ impl App {
             idx += tool.fields.len();
         }
         idx
+    }
+
+    fn is_editing(&self) -> bool {
+        matches!(self.mode, AppMode::Editing { .. })
+    }
+
+    fn is_selecting(&self) -> bool {
+        matches!(self.mode, AppMode::Selecting { .. })
+    }
+
+    fn editing_view(&self) -> Option<(usize, &str, usize)> {
+        match &self.mode {
+            AppMode::Editing {
+                field_idx,
+                buffer,
+                cursor,
+            } => Some((*field_idx, buffer.as_str(), *cursor)),
+            _ => None,
+        }
+    }
+
+    fn editing_mut(&mut self) -> Option<(&mut String, &mut usize)> {
+        match &mut self.mode {
+            AppMode::Editing { buffer, cursor, .. } => Some((buffer, cursor)),
+            _ => None,
+        }
+    }
+
+    fn selecting_view(&self) -> Option<(usize, &[String], usize)> {
+        match &self.mode {
+            AppMode::Selecting {
+                field_idx,
+                options,
+                selected,
+            } => Some((*field_idx, options.as_slice(), *selected)),
+            _ => None,
+        }
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.last_error = Some(message.into());
+        self.error_expire = Some(Instant::now() + UI_ERROR_TTL);
+    }
+
+    fn sync_transient_errors(&mut self) {
+        while let Some(error) = pop_ui_error() {
+            self.set_error(error);
+        }
+
+        if self
+            .error_expire
+            .is_some_and(|expire_at| Instant::now() >= expire_at)
+        {
+            self.last_error = None;
+            self.error_expire = None;
+        }
     }
 
     fn set_from_flat(&mut self, flat: usize) {
@@ -1697,14 +1867,21 @@ impl App {
     }
 
     fn move_select_up(&mut self) {
-        if self.select_index > 0 {
-            self.select_index -= 1;
+        if let AppMode::Selecting { selected, .. } = &mut self.mode {
+            if *selected > 0 {
+                *selected -= 1;
+            }
         }
     }
 
     fn move_select_down(&mut self) {
-        if self.select_index + 1 < self.select_options.len() {
-            self.select_index += 1;
+        if let AppMode::Selecting {
+            selected, options, ..
+        } = &mut self.mode
+        {
+            if *selected + 1 < options.len() {
+                *selected += 1;
+            }
         }
     }
 
@@ -1747,20 +1924,21 @@ impl App {
         }
 
         if !field.options.is_empty() {
-            self.selecting = true;
-            self.select_options = field.options.clone();
-            self.select_index = field
-                .options
-                .iter()
-                .position(|o| *o == field.value)
-                .unwrap_or(0);
+            self.mode = AppMode::Selecting {
+                field_idx: self.field_index,
+                options: field.options.clone(),
+                selected: field
+                    .options
+                    .iter()
+                    .position(|o| *o == field.value)
+                    .unwrap_or(0),
+            };
             self.focus = Focus::Editor;
             return;
         }
-        self.editing = true;
 
         // For API Key fields, load the full key from auth.json (OpenCode) or config
-        self.edit_buf = if field.value == "—" {
+        let edit_buf = if field.value == "—" {
             // Empty placeholder
             String::new()
         } else if tool.tool == Tool::KakuAssistant && field.key == "API Key" {
@@ -1778,85 +1956,102 @@ impl App {
         } else {
             field.value.clone()
         };
-        self.edit_cursor = self.edit_buf.len(); // Start cursor at end (always a valid byte boundary)
+        let edit_cursor = edit_buf.len(); // Start cursor at end (always a valid byte boundary)
+        self.mode = AppMode::Editing {
+            field_idx: self.field_index,
+            buffer: edit_buf,
+            cursor: edit_cursor,
+        };
         self.focus = Focus::Editor;
     }
 
     fn confirm_select(&mut self) {
-        if !self.selecting {
+        let AppMode::Selecting {
+            field_idx,
+            options,
+            selected,
+        } = std::mem::replace(&mut self.mode, AppMode::Browsing)
+        else {
             return;
-        }
-        self.selecting = false;
+        };
         self.focus = Focus::ToolList;
 
         if self.tool_index >= self.tools.len() {
             return;
         }
-        if self.field_index >= self.tools[self.tool_index].fields.len() {
+        if field_idx >= self.tools[self.tool_index].fields.len() {
             return;
         }
-        if self.select_index >= self.select_options.len() {
+        if selected >= options.len() {
             return;
         }
 
-        let new_val = self.select_options[self.select_index].clone();
+        self.field_index = field_idx;
+        let new_val = options[selected].clone();
         let tool_kind = self.tools[self.tool_index].tool;
-        let field_key = self.tools[self.tool_index].fields[self.field_index]
-            .key
-            .clone();
-        let old_val = self.tools[self.tool_index].fields[self.field_index]
-            .value
-            .clone();
+        let field_key = self.tools[self.tool_index].fields[field_idx].key.clone();
+        let old_val = self.tools[self.tool_index].fields[field_idx].value.clone();
 
         if new_val == old_val {
             return;
         }
 
-        self.tools[self.tool_index].fields[self.field_index].value = new_val.clone();
+        self.tools[self.tool_index].fields[field_idx].value = new_val.clone();
         let status_val = status_value_for_display(&field_key, &new_val);
         match save_field(tool_kind, &field_key, &new_val) {
             Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, status_val)),
-            Err(e) => self.status_msg = Some(format!("Save failed: {}", e)),
+            Err(e) => {
+                self.status_msg = Some(format!("Save failed: {}", e));
+                self.set_error(format!("Save failed: {}", e));
+            }
         }
         self.reload_current_tool();
     }
 
     fn cancel_select(&mut self) {
-        self.selecting = false;
+        self.mode = AppMode::Browsing;
         self.focus = Focus::ToolList;
     }
 
     fn confirm_edit(&mut self) {
-        if !self.editing {
+        let AppMode::Editing {
+            field_idx,
+            buffer,
+            cursor: _,
+        } = std::mem::replace(&mut self.mode, AppMode::Browsing)
+        else {
             return;
-        }
-        self.editing = false;
+        };
         self.focus = Focus::ToolList;
 
         let tool = &mut self.tools[self.tool_index];
-        if self.field_index >= tool.fields.len() {
+        if field_idx >= tool.fields.len() {
             return;
         }
 
-        let new_val = self.edit_buf.trim().to_string();
-        let field_key = tool.fields[self.field_index].key.clone();
+        self.field_index = field_idx;
+        let new_val = buffer.trim().to_string();
+        let field_key = tool.fields[field_idx].key.clone();
 
         // Empty input on API Key fields means cancel, not clear
         if new_val.is_empty() && field_key.contains("API Key") {
             return;
         }
 
-        let old_val = tool.fields[self.field_index].value.clone();
+        let old_val = tool.fields[field_idx].value.clone();
         if new_val == old_val || (new_val.is_empty() && old_val == "—") {
             return;
         }
 
-        tool.fields[self.field_index].value = new_val.clone();
+        tool.fields[field_idx].value = new_val.clone();
 
         let status_val = status_value_for_display(&field_key, &new_val);
         match save_field(tool.tool, &field_key, &new_val) {
             Ok(()) => self.status_msg = Some(format!("Saved {} → {}", field_key, status_val)),
-            Err(e) => self.status_msg = Some(format!("Save failed: {}", e)),
+            Err(e) => {
+                self.status_msg = Some(format!("Save failed: {}", e));
+                self.set_error(format!("Save failed: {}", e));
+            }
         }
         self.reload_current_tool();
     }
@@ -1867,8 +2062,7 @@ impl App {
     }
 
     fn cancel_edit(&mut self) {
-        self.editing = false;
-        self.selecting = false;
+        self.mode = AppMode::Browsing;
         self.focus = Focus::ToolList;
     }
 
@@ -1895,9 +2089,11 @@ impl App {
             Some(_) => {
                 self.tools = ALL_TOOLS.iter().map(|t| ToolState::load(*t)).collect();
                 self.status_msg = Some("Models refreshed".into());
+                self.sync_transient_errors();
             }
             None => {
                 self.status_msg = Some("Refresh failed (network error)".into());
+                self.set_error("Models refresh failed. Check network or proxy.");
             }
         }
     }
@@ -2338,12 +2534,13 @@ fn run_loop(
     app: &mut App,
 ) -> anyhow::Result<()> {
     loop {
+        app.sync_transient_errors();
         terminal.draw(|frame| ui::ui(frame, app))?;
 
         match event::read().context("read event")? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 app.status_msg = None;
-                if app.selecting {
+                if app.is_selecting() {
                     match key.code {
                         KeyCode::Enter => app.confirm_select(),
                         KeyCode::Esc => app.cancel_select(),
@@ -2354,42 +2551,54 @@ fn run_loop(
                     continue;
                 }
 
-                if app.editing {
+                if app.is_editing() {
                     match key.code {
                         KeyCode::Enter => app.confirm_edit(),
                         KeyCode::Esc => app.cancel_edit(),
                         KeyCode::Left => {
-                            if app.edit_cursor > 0 {
-                                app.edit_cursor =
-                                    prev_char_boundary(&app.edit_buf, app.edit_cursor);
+                            if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                if *edit_cursor > 0 {
+                                    *edit_cursor = prev_char_boundary(edit_buf, *edit_cursor);
+                                }
                             }
                         }
                         KeyCode::Right => {
-                            if app.edit_cursor < app.edit_buf.len() {
-                                app.edit_cursor =
-                                    next_char_boundary(&app.edit_buf, app.edit_cursor);
+                            if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                if *edit_cursor < edit_buf.len() {
+                                    *edit_cursor = next_char_boundary(edit_buf, *edit_cursor);
+                                }
                             }
                         }
                         KeyCode::Home => {
-                            app.edit_cursor = 0;
+                            if let Some((_, edit_cursor)) = app.editing_mut() {
+                                *edit_cursor = 0;
+                            }
                         }
                         KeyCode::End => {
-                            app.edit_cursor = app.edit_buf.len();
+                            if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                *edit_cursor = edit_buf.len();
+                            }
                         }
                         KeyCode::Backspace => {
                             if key.modifiers.contains(KeyModifiers::CONTROL)
                                 || key.modifiers.contains(KeyModifiers::SUPER)
                             {
                                 // Cmd+Backspace (macOS) or Ctrl+Backspace - clear all
-                                app.edit_buf.clear();
-                                app.edit_cursor = 0;
-                            } else if app.edit_cursor > 0 {
-                                edit_backspace(&mut app.edit_buf, &mut app.edit_cursor);
+                                if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                    edit_buf.clear();
+                                    *edit_cursor = 0;
+                                }
+                            } else if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                if *edit_cursor > 0 {
+                                    edit_backspace(edit_buf, edit_cursor);
+                                }
                             }
                         }
                         KeyCode::Delete => {
-                            if app.edit_cursor < app.edit_buf.len() {
-                                edit_delete(&mut app.edit_buf, app.edit_cursor);
+                            if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                if *edit_cursor < edit_buf.len() {
+                                    edit_delete(edit_buf, *edit_cursor);
+                                }
                             }
                         }
                         KeyCode::Char(c) => {
@@ -2398,14 +2607,18 @@ fn run_loop(
                                 || key.modifiers.contains(KeyModifiers::SUPER))
                                 && c == 'u'
                             {
-                                app.edit_buf.clear();
-                                app.edit_cursor = 0;
+                                if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                    edit_buf.clear();
+                                    *edit_cursor = 0;
+                                }
                             }
                             // Ignore other control characters
                             else if !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::SUPER)
                             {
-                                edit_insert_char(&mut app.edit_buf, &mut app.edit_cursor, c);
+                                if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                                    edit_insert_char(edit_buf, edit_cursor, c);
+                                }
                             }
                         }
                         _ => {}
@@ -2432,7 +2645,7 @@ fn run_loop(
                 _ => {}
             },
             Event::Paste(text) => {
-                if !app.editing || text.is_empty() {
+                if !app.is_editing() || text.is_empty() {
                     continue;
                 }
 
@@ -2442,8 +2655,10 @@ fn run_loop(
                 if cleaned.is_empty() {
                     continue;
                 }
-                for c in cleaned.chars() {
-                    edit_insert_char(&mut app.edit_buf, &mut app.edit_cursor, c);
+                if let Some((edit_buf, edit_cursor)) = app.editing_mut() {
+                    for c in cleaned.chars() {
+                        edit_insert_char(edit_buf, edit_cursor, c);
+                    }
                 }
             }
             _ => {}

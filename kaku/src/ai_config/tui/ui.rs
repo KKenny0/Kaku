@@ -31,9 +31,9 @@ pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     render_tools(frame, chunks[1], app);
     render_status_bar(frame, chunks[2], app);
 
-    if app.selecting {
+    if app.is_selecting() {
         render_selector(frame, area, app);
-    } else if app.editing {
+    } else if app.is_editing() {
         render_editor(frame, area, app);
     }
 }
@@ -192,7 +192,12 @@ fn render_tools(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let status = if let Some(msg) = &app.status_msg {
+    let status = if let Some(msg) = &app.last_error {
+        Line::from(vec![
+            Span::styled(" ✖ ", Style::default().fg(red())),
+            Span::styled(msg.as_str(), Style::default().fg(red())),
+        ])
+    } else if let Some(msg) = &app.status_msg {
         Line::from(vec![
             Span::styled(" ℹ ", Style::default().fg(green())),
             Span::styled(msg.as_str(), Style::default().fg(text_fg())),
@@ -242,10 +247,13 @@ fn render_status_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
 pub(super) fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let tool = &app.tools[app.tool_index];
-    if app.field_index >= tool.fields.len() {
+    let Some((field_idx, edit_buf, edit_cursor)) = app.editing_view() else {
+        return;
+    };
+    if field_idx >= tool.fields.len() {
         return;
     }
-    let field = &tool.fields[app.field_index];
+    let field = &tool.fields[field_idx];
 
     let popup_width = ((area.width as f32 * 0.8) as u16).min(area.width.saturating_sub(4));
     let popup_height = 5u16.min(area.height.saturating_sub(4));
@@ -277,14 +285,14 @@ pub(super) fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let content_area = inner.inner(Margin::new(1, 0));
 
-    let line = if app.edit_buf.is_empty() {
+    let line = if edit_buf.is_empty() {
         Line::from(Span::styled(" ", Style::default().bg(purple())))
     } else {
-        let cursor_pos = app.edit_cursor;
-        let before = &app.edit_buf[..cursor_pos];
-        let after = &app.edit_buf[cursor_pos..];
+        let cursor_pos = edit_cursor;
+        let before = &edit_buf[..cursor_pos];
+        let after = &edit_buf[cursor_pos..];
 
-        if cursor_pos >= app.edit_buf.len() {
+        if cursor_pos >= edit_buf.len() {
             Line::from(vec![
                 Span::styled(before, Style::default().fg(text_fg())),
                 Span::styled(" ", Style::default().bg(purple())),
@@ -311,16 +319,18 @@ pub(super) fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
 fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let tool = &app.tools[app.tool_index];
-    if app.field_index >= tool.fields.len() {
+    let Some((field_idx, select_options, select_index)) = app.selecting_view() else {
+        return;
+    };
+    if field_idx >= tool.fields.len() {
         return;
     }
-    let field = &tool.fields[app.field_index];
+    let field = &tool.fields[field_idx];
 
-    let option_count = app.select_options.len() as u16;
+    let option_count = select_options.len() as u16;
     let max_popup_width = area.width.saturating_sub(4);
     let min_popup_width = 60u16.min(max_popup_width);
-    let longest_option_width = app
-        .select_options
+    let longest_option_width = select_options
         .iter()
         .map(|opt| opt.chars().count() as u16)
         .max()
@@ -352,12 +362,11 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let items: Vec<ListItem> = app
-        .select_options
+    let items: Vec<ListItem> = select_options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
-            let is_sel = i == app.select_index;
+            let is_sel = i == select_index;
             let marker = if is_sel { "➤ " } else { "  " };
             let style = if is_sel {
                 Style::default().fg(purple()).add_modifier(Modifier::BOLD)
@@ -375,7 +384,7 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .collect();
 
     let mut state = ListState::default();
-    state.select(Some(app.select_index));
+    state.select(Some(select_index));
 
     let list = List::new(items).highlight_style(Style::default());
     frame.render_stateful_widget(list, inner, &mut state);
