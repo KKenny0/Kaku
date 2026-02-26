@@ -12,7 +12,7 @@ pub const OPENCODE_THEME_JSON: &str = r##"{
     "error": "#ff6767",
     "warning": "#ffca85",
     "success": "#61ffca",
-    "info": "#82e2ff",
+    "info": "#5fa8ff",
     "border": "#15141b",
     "border_active": "#29263c",
     "border_subtle": "#15141b"

@@ -1434,7 +1434,8 @@ local KAKU_SURFACE_ACTIVE = '#29263c'
 local KAKU_GREEN = '#61ffca'
 local KAKU_ORANGE = '#ffca85'
 local KAKU_PINK = '#f694ff'
-local KAKU_BLUE = '#82e2ff'
+local KAKU_BLUE = '#5fa8ff'
+local KAKU_BRIGHT_BLUE = '#8cc2ff'
 local KAKU_RED = '#ff6767'
 
 wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, max_width)
@@ -1834,7 +1835,7 @@ local kaku_theme = {
     KAKU_RED,     -- bright red
     KAKU_GREEN,   -- bright green
     KAKU_ORANGE,  -- bright yellow
-    KAKU_BLUE,    -- bright blue
+    KAKU_BRIGHT_BLUE, -- bright blue
     KAKU_PURPLE,  -- bright magenta
     KAKU_GREEN,   -- bright cyan
     KAKU_WHITE,   -- bright white
