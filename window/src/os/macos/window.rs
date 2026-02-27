@@ -1468,7 +1468,7 @@ impl WindowInner {
         }
     }
 
-    fn is_fullscreen(&mut self) -> bool {
+    pub(crate) fn is_fullscreen(&mut self) -> bool {
         if self.is_native_fullscreen() {
             true
         } else if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
@@ -1502,7 +1502,7 @@ impl WindowInner {
 
     /// If we were in native full screen mode, exit it and return true.
     /// Otherwise, return false.
-    fn exit_native_fullscreen(&mut self) -> bool {
+    pub(crate) fn exit_native_fullscreen(&mut self) -> bool {
         if self.is_native_fullscreen() {
             if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
                 window_view.native_fullscreen_transition_active.set(true);
@@ -1520,7 +1520,7 @@ impl WindowInner {
 
     /// If we were in simple full screen mode, exit it and return true.
     /// Otherwise, return false
-    fn exit_simple_fullscreen(&mut self) -> bool {
+    pub(crate) fn exit_simple_fullscreen(&mut self) -> bool {
         if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
             let is_fullscreen = window_view.inner.borrow().fullscreen.is_some();
             if is_fullscreen {
@@ -1747,6 +1747,15 @@ impl WindowInner {
             // We could literally set it invisible like this, but
             // then there is no UI to make it visible again later.
             //let () = msg_send![*self.window, setIsVisible: NO];
+        }
+    }
+
+    /// Remove the window from screen without changing fullscreen state.
+    /// Used by the global hotkey to hide a fullscreen window; the window
+    /// retains its fullscreen style mask and will restore when focused.
+    pub(crate) fn order_out(&mut self) {
+        unsafe {
+            let () = msg_send![*self.window, orderOut: nil];
         }
     }
 

@@ -322,8 +322,8 @@ tell application "Finder"
 		try
 			set background picture of viewOptions to file ".background:${background_name}"
 		end try
-		set position of item "${app_name}.app" of container window to {190, 250}
-		set position of item "Applications" of container window to {500, 250}
+		set position of item "${app_name}.app" of container window to {190, 245}
+		set position of item "Applications" of container window to {500, 245}
 		close
 		open
 		update without registering applications

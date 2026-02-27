@@ -201,7 +201,30 @@ fn toggle_hotkey_window() {
 
     let is_active: BOOL = unsafe { msg_send![NSApp(), isActive] };
     if is_active == YES {
-        conn.hide_application();
+        // [NSApp hide:] is a no-op when a window is in native fullscreen.
+        // Instead, directly order out each window so it disappears without
+        // leaving fullscreen. The window keeps its fullscreen state and will
+        // restore on the next hotkey press via makeKeyAndOrderFront:.
+        let has_fullscreen = {
+            let windows = conn.windows.borrow();
+            let mut any_fs = false;
+            for window in windows.values() {
+                let mut inner = window.borrow_mut();
+                if inner.is_fullscreen() {
+                    any_fs = true;
+                    inner.order_out();
+                }
+            }
+            any_fs
+        };
+        if has_fullscreen {
+            // Deactivate the app so macOS switches to the next app.
+            unsafe {
+                let () = msg_send![NSApp(), hide: NSApp()];
+            }
+        } else {
+            conn.hide_application();
+        }
         return;
     }
 
