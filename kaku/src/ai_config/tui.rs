@@ -430,7 +430,7 @@ impl KakuAssistantConfig {
 
 impl Default for KakuAssistantConfig {
     fn default() -> Self {
-        Self::new(true, String::new(), String::new(), String::new())
+        Self::new(false, String::new(), String::new(), String::new())
     }
 }
 
@@ -448,7 +448,7 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
     let enabled = parsed
         .get("enabled")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let api_key = parsed.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
     let model = parsed.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let base_url = parsed
@@ -475,16 +475,22 @@ fn get_kaku_assistant_api_key() -> Option<String> {
     }
 }
 
+fn kaku_assistant_enabled_display(cfg: &KakuAssistantConfig) -> &'static str {
+    if !cfg.is_enabled() {
+        return "Off";
+    }
+    if cfg.api_key().trim().is_empty() {
+        return "Not configured";
+    }
+    "On"
+}
+
 fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
     let cfg = parse_kaku_assistant_config(raw);
     vec![
         FieldEntry {
             key: "Enabled".into(),
-            value: if cfg.is_enabled() {
-                "On".into()
-            } else {
-                "Off".into()
-            },
+            value: kaku_assistant_enabled_display(&cfg).into(),
             options: vec!["On".into(), "Off".into()],
             editable: true,
         },
@@ -2870,5 +2876,25 @@ mod tests {
             Some("gpt-5.1-codex")
         );
         assert_eq!(session_defaults.get("reasoningEffort"), None);
+    }
+
+    #[test]
+    fn kaku_assistant_enabled_shows_not_configured_without_api_key() {
+        let fields = extract_kaku_assistant_fields("enabled = true\n");
+        let enabled = fields
+            .iter()
+            .find(|f| f.key == "Enabled")
+            .expect("enabled field");
+        assert_eq!(enabled.value, "Not configured");
+    }
+
+    #[test]
+    fn kaku_assistant_enabled_shows_off_when_disabled() {
+        let fields = extract_kaku_assistant_fields("enabled = false\n");
+        let enabled = fields
+            .iter()
+            .find(|f| f.key == "Enabled")
+            .expect("enabled field");
+        assert_eq!(enabled.value, "Off");
     }
 }
