@@ -7,9 +7,9 @@ use crate::inputmap::InputMap;
 #[cfg(not(target_os = "macos"))]
 use crate::overlay::confirm_close_window;
 use crate::overlay::{
+    CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags, QuickSelectOverlay,
     confirm_close_pane, confirm_close_tab, confirm_quit_program, launcher, show_debug_overlay,
-    start_overlay, start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
-    QuickSelectOverlay,
+    start_overlay, start_overlay_pane,
 };
 use crate::resize_increment_calculator::ResizeIncrementCalculator;
 use crate::scripting::guiwin::GuiWin;
@@ -18,7 +18,7 @@ use crate::selection::Selection;
 use crate::shapecache::*;
 use crate::tabbar::{TabBarItem, TabBarState};
 use crate::termwindow::background::{
-    load_background_image, reload_background_image, LoadedBackgroundLayer,
+    LoadedBackgroundLayer, load_background_image, reload_background_image,
 };
 use crate::termwindow::keyevent::{KeyTableArgs, KeyTableState};
 use crate::termwindow::modal::Modal;
@@ -29,17 +29,16 @@ use crate::termwindow::render::{
 };
 use crate::termwindow::webgpu::WebGpuState;
 use ::wezterm_term::input::{ClickPosition, MouseButton as TMB};
-use ::window::{ULength, *};
-use anyhow::{anyhow, ensure, Context};
+use ::window::*;
+use anyhow::{Context, anyhow, ensure};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
-    PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SpawnTabDomain,
-    SplitSize,
+    PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
 };
 use config::window::WindowLevel;
 use config::{
-    configuration, AudibleBell, ConfigHandle, Dimension, DimensionContext, FrontEndSelection,
-    GeometryOrigin, GuiPosition, TermConfig, WindowCloseConfirmation,
+    AudibleBell, ConfigHandle, Dimension, DimensionContext, FrontEndSelection, GeometryOrigin,
+    GuiPosition, TermConfig, WindowCloseConfirmation, configuration,
 };
 use lfucache::*;
 use mlua::{FromLua, LuaSerdeExt, UserData, UserDataFields};
@@ -54,8 +53,8 @@ use mux::tab::{
 use mux::window::WindowId as MuxWindowId;
 use mux::{Mux, MuxNotification};
 use mux_lua::MuxPane;
-use smol::channel::Sender;
 use smol::Timer;
+use smol::channel::Sender;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, LinkedList};
 use std::ops::Add;
@@ -67,8 +66,8 @@ use std::time::{Duration, Instant};
 use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::SequenceNo;
 use wezterm_dynamic::Value;
-use wezterm_font::units::PixelLength;
 use wezterm_font::FontConfiguration;
+use wezterm_font::units::PixelLength;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
 use wezterm_term::{Alert, Progress, StableRowIndex, TerminalConfiguration, TerminalSize};
@@ -736,12 +735,17 @@ pub struct TermWindow {
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
+    skip_config_reload_generation: Option<usize>,
 
     /// Toast notification: (start_time, message, lifetime)
     toast: Option<(Instant, String, Duration)>,
 }
 
 impl TermWindow {
+    fn should_reload_config_for_user_var(name: &str, window_contains_pane: bool) -> bool {
+        window_contains_pane && name == "KAKU_CONFIG_CHANGED"
+    }
+
     fn load_os_parameters(&mut self) {
         if let Some(ref window) = self.window {
             self.os_parameters = match window.get_os_parameters(&self.config, self.window_state) {
@@ -962,8 +966,13 @@ impl TermWindow {
             pixel_max: terminal_size.pixel_height as f32,
             pixel_cell: render_metrics.cell_size.height as f32,
         };
-        let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let (padding_top, padding_bottom) = resize::effective_vertical_padding(
+            &config,
+            v_context,
+            show_tab_bar,
+            config.tab_bar_at_bottom,
+            tab_bar_height,
+        );
 
         let mut dimensions = Dimensions {
             pixel_width: (terminal_size.pixel_width + padding_left + padding_right) as usize,
@@ -976,11 +985,11 @@ impl TermWindow {
 
         let mut border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
 
-        // Mirror get_os_border(): add 6px when tab bar is at top so the
-        // initial window height accounts for the same chrome space used at runtime.
-        let tab_bar_at_top = show_tab_bar && !config.tab_bar_at_bottom;
-        if tab_bar_at_top {
-            border.top += ULength::new(6);
+        // Mirror get_os_border() for non-fullscreen startup windows.
+        let integrated_top_inset =
+            crate::termwindow::render::borders::integrated_buttons_top_inset(&config, false);
+        if integrated_top_inset > 0 {
+            border.top += ULength::new(integrated_top_inset);
         }
 
         dimensions.pixel_height += (border.top + border.bottom).get() as usize;
@@ -1007,6 +1016,7 @@ impl TermWindow {
             last_frame_duration: Duration::ZERO,
             fps: 0.,
             config_subscription: None,
+            skip_config_reload_generation: None,
             os_parameters: None,
             gl: None,
             webgpu: None,
@@ -1194,9 +1204,9 @@ impl TermWindow {
                         "WebGpu initialization failed; falling back to OpenGL. Error: {:#}",
                         err
                     );
-                    let gl = window.enable_opengl().await.with_context(|| {
-                        "WebGpu initialization failed and OpenGL fallback also failed"
-                    })?;
+                    let gl = window.enable_opengl().await.with_context(
+                        || "WebGpu initialization failed and OpenGL fallback also failed",
+                    )?;
                     (Some(gl), None)
                 }
             },
@@ -2094,6 +2104,26 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    /// Computes effective vertical padding for the current window state.
+    pub fn effective_vertical_padding(&self) -> (usize, usize) {
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.) as usize
+        } else {
+            0
+        };
+        resize::effective_vertical_padding(
+            &self.config,
+            DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.terminal_size.pixel_height as f32,
+                pixel_cell: self.render_metrics.cell_size.height as f32,
+            },
+            self.show_tab_bar,
+            self.config.tab_bar_at_bottom,
+            tab_bar_height,
+        )
+    }
+
     /// Decide whether the tab bar should be visible based on tab count,
     /// fullscreen state, and config.
     fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
@@ -2117,6 +2147,11 @@ impl TermWindow {
     }
 
     pub fn config_was_reloaded(&mut self) {
+        if self.skip_config_reload_generation == Some(configuration().generation()) {
+            self.skip_config_reload_generation = None;
+            return;
+        }
+
         // Skip config reload during live resizing to avoid performance issues
         // when dragging the window. The reload will be processed after resize completes.
         if self.live_resizing {
@@ -2326,7 +2361,19 @@ impl TermWindow {
     }
 
     fn emit_user_var_event(&mut self, pane_id: PaneId, name: String, value: String) {
-        if !self.window_contains_pane(pane_id) {
+        let window_contains_pane = self.window_contains_pane(pane_id);
+
+        // Config TUI signals that config file was just saved; reload immediately.
+        // Only the window containing the signaling pane triggers reload to avoid
+        // duplicate reloads when multiple windows are open.
+        if Self::should_reload_config_for_user_var(&name, window_contains_pane) {
+            config::reload();
+            self.config_was_reloaded_impl();
+            self.skip_config_reload_generation = Some(self.config.generation());
+            return;
+        }
+
+        if !window_contains_pane {
             return;
         }
 
@@ -2413,6 +2460,7 @@ impl TermWindow {
             },
             &tabs,
             &panes,
+            self.window_state.contains(WindowState::FULL_SCREEN),
             self.config.resolved_palette.tab_bar.as_ref(),
             &self.config,
             &self.left_status,
@@ -3278,15 +3326,7 @@ impl TermWindow {
             }
             EmitEvent(name) => {
                 if name == "update-kaku" || name == "run-kaku-update" {
-                    let kaku_cli = crate::frontend::kaku_cli_program_for_spawn();
-                    self.spawn_command(
-                        &SpawnCommand {
-                            args: Some(vec![kaku_cli, "update".to_string()]),
-                            domain: SpawnTabDomain::DomainName("local".to_string()),
-                            ..Default::default()
-                        },
-                        SpawnWhere::NewWindow,
-                    );
+                    crate::frontend::run_kaku_update_from_menu();
                 } else if name == "run-kaku-cli" {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "run-kaku-ai-config" {
@@ -4141,5 +4181,30 @@ impl Drop for TermWindow {
                 fe.forget_known_window(&window);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TermWindow;
+
+    #[test]
+    fn config_changed_reload_requires_pane_to_belong_to_window() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            false
+        ));
+        assert!(TermWindow::should_reload_config_for_user_var(
+            "KAKU_CONFIG_CHANGED",
+            true
+        ));
+    }
+
+    #[test]
+    fn unrelated_user_var_never_triggers_config_reload() {
+        assert!(!TermWindow::should_reload_config_for_user_var(
+            "SOME_OTHER_USER_VAR",
+            true
+        ));
     }
 }

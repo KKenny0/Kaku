@@ -6,8 +6,8 @@ use crate::termwindow::render::corners::{
 };
 use crate::termwindow::{DimensionContext, RenderFrame, TermWindowNotif};
 use crate::utilsprites::RenderMetrics;
-use ::window::bitmaps::atlas::OutOfTextureSpace;
 use ::window::WindowOps;
+use ::window::bitmaps::atlas::OutOfTextureSpace;
 use anyhow::Context;
 use config::Dimension;
 use smol::Timer;
@@ -24,8 +24,6 @@ pub enum AllowImage {
 }
 
 const STATUS_DOT_SIZE: f32 = 12.0;
-/// Minimal gap between terminal content and the bottom tab bar.
-pub(super) const BOTTOM_TAB_BAR_PADDING: f32 = 4.0;
 
 impl crate::TermWindow {
     pub fn paint_impl(&mut self, frame: &mut RenderFrame) -> anyhow::Result<()> {
@@ -245,19 +243,8 @@ impl crate::TermWindow {
                 } else {
                     0.0
                 };
-                // When tab bar is at bottom, use minimal padding between content and tab bar
-                let padding_bottom = if self.config.tab_bar_at_bottom && tab_bar_height > 0.0 {
-                    BOTTOM_TAB_BAR_PADDING
-                } else {
-                    self.config
-                        .window_padding
-                        .bottom
-                        .evaluate_as_pixels(DimensionContext {
-                            dpi: self.dimensions.dpi as f32,
-                            pixel_max: self.terminal_size.pixel_height as f32,
-                            pixel_cell: self.render_metrics.cell_size.height as f32,
-                        })
-                };
+                let (_, padding_bottom) = self.effective_vertical_padding();
+                let padding_bottom = padding_bottom as f32;
                 let top_fill_height = border.top.get() as f32
                     + if self.config.tab_bar_at_bottom {
                         0.0

@@ -23,8 +23,8 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wezterm_dynamic::{FromDynamic, ToDynamic};
 use wezterm_term::{KeyCode, KeyModifiers, MouseEvent};
-use window::color::LinearRgba;
 use window::WindowOps;
+use window::color::LinearRgba;
 
 // Kaku palette visual defaults. Used only when the user keeps the stock
 // command_palette_* colors, so custom config still takes precedence.
@@ -574,12 +574,13 @@ impl CommandPalette {
         let mut elements = vec![];
 
         // Search box with explicit blinking caret so focus is obvious.
-        let mut search_row = vec![Element::new(&font, ElementContent::Text("⌘ ".to_string()))
-            .colors(ElementColors {
+        let mut search_row = vec![
+            Element::new(&font, ElementContent::Text("⌘ ".to_string())).colors(ElementColors {
                 border: BorderColor::default(),
                 bg: LinearRgba::TRANSPARENT.into(),
                 text: theme.accent.into(),
-            })];
+            }),
+        ];
         let caret = if cursor_visible { "▏" } else { " " };
         if selection.is_empty() {
             search_row.push(

@@ -1,8 +1,8 @@
-use crate::termwindow::TermWindowNotif;
 use crate::TermWindow;
+use crate::termwindow::TermWindowNotif;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
-use mux::pane::Pane;
 use mux::Mux;
+use mux::pane::Pane;
 use smol::Timer;
 use std::collections::HashMap;
 use std::path::PathBuf;

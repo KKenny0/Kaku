@@ -152,6 +152,55 @@ pub fn open_kaku_config() {
     .detach();
 }
 
+pub fn run_kaku_update_from_menu() {
+    // Run through the user's shell so rc-initialized env is available.
+    // This keeps menu-triggered update behavior consistent with typing
+    // `kaku update` in a normal shell tab.
+    run_kaku_subcommand_in_shell_new_window("update");
+}
+
+fn run_kaku_subcommand_in_shell_new_window(subcommand: &str) {
+    let subcommand = subcommand.to_string();
+    let kaku_bin = kaku_cli_program_for_spawn();
+    let fallback_bin = shlex::try_quote(&kaku_bin)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| kaku_bin.clone());
+    let command = format!("kaku {subcommand} || {fallback_bin} {subcommand}\n");
+
+    promise::spawn::spawn(async move {
+        use config::keyassignment::SpawnTabDomain;
+        use wezterm_term::TerminalSize;
+
+        let mux = Mux::get();
+        let workspace = mux.active_workspace();
+
+        match mux
+            .spawn_tab_or_window(
+                None,
+                SpawnTabDomain::DomainName("local".to_string()),
+                None,
+                None,
+                None,
+                TerminalSize::default(),
+                None,
+                workspace,
+                None,
+            )
+            .await
+        {
+            Ok((_tab, pane, _window_id)) => {
+                if let Err(err) = write!(pane.writer(), "{command}") {
+                    log::warn!("failed to send kaku {subcommand} to pane: {err:#}");
+                }
+            }
+            Err(err) => {
+                log::error!("Failed to spawn menu command `kaku {subcommand}`: {err:#}");
+            }
+        }
+    })
+    .detach();
+}
+
 pub fn set_default_terminal_with_feedback() {
     fn show_window_toast(message: &str) -> bool {
         let windows = front_end().gui_windows();
@@ -557,14 +606,7 @@ impl GuiFrontEnd {
                     KeyAssignment::EmitEvent(event)
                         if event == "update-kaku" || event == "run-kaku-update" =>
                     {
-                        let kaku_cli = kaku_cli_program_for_spawn();
-                        spawn_command(
-                            &SpawnCommand {
-                                args: Some(vec![kaku_cli, "update".to_string()]),
-                                ..Default::default()
-                            },
-                            SpawnWhere::NewWindow,
-                        );
+                        run_kaku_update_from_menu();
                     }
                     KeyAssignment::EmitEvent(event) if event == "run-kaku-cli" => {
                         let kaku_cli = kaku_cli_program_for_spawn();
