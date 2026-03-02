@@ -379,8 +379,34 @@ extern "C" fn application_did_finish_launching(this: &mut Object, _sel: Sel, _no
     unsafe {
         let () = msg_send![NSApp(), setServicesProvider: this as *mut Object];
         (*this).set_ivar("launched", YES);
+
+        // Register for screen wake notifications to update OpenGL contexts
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let notification_center: id = msg_send![workspace, notificationCenter];
+        let notification_name = nsstring("NSWorkspaceScreensDidWakeNotification");
+        let () = msg_send![notification_center,
+            addObserver: this as *mut Object
+            selector: sel!(screensDidWake:)
+            name: *notification_name
+            object: nil
+        ];
+        log::debug!("registered for NSWorkspaceScreensDidWakeNotification");
     }
     sync_global_hotkey_registration();
+}
+
+/// Called when the system wakes from sleep. Updates all OpenGL contexts to
+/// prevent crashes from stale surfaces when AppKit tries to flush the backing layer.
+extern "C" fn screens_did_wake(_self: &mut Object, _sel: Sel, _notification: *mut Object) {
+    log::debug!("NSWorkspaceScreensDidWakeNotification received, updating OpenGL contexts");
+    if let Some(conn) = Connection::get() {
+        let windows = conn.windows.borrow();
+        for window in windows.values() {
+            if let Ok(mut inner) = window.try_borrow_mut() {
+                inner.update_opengl_context_after_wake();
+            }
+        }
+    }
 }
 
 extern "C" fn application_open_untitled_file(
@@ -787,6 +813,10 @@ fn get_class() -> &'static Class {
                 sel!(openInKakuWindowService:userData:error:),
                 open_in_kaku_window_service
                     as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object),
+            );
+            cls.add_method(
+                sel!(screensDidWake:),
+                screens_did_wake as extern "C" fn(&mut Object, Sel, *mut Object),
             );
         }
 

@@ -1716,6 +1716,25 @@ impl WindowInner {
 }
 
 impl WindowInner {
+    /// Update the OpenGL context after the system wakes from sleep.
+    /// This prevents crashes when AppKit tries to flush a stale OpenGL surface.
+    pub(crate) fn update_opengl_context_after_wake(&mut self) {
+        if let Some(window_view) = WindowView::get_this(unsafe { &**self.view }) {
+            if let Ok(mut inner) = window_view.inner.try_borrow_mut() {
+                if let Some(gl_context_pair) = inner.gl_context_pair.as_ref() {
+                    log::debug!(
+                        "updating OpenGL context for window after wake (window_id={})",
+                        inner.window_id
+                    );
+                    gl_context_pair.backend.update();
+                }
+                // Trigger a repaint to ensure the window content is refreshed
+                inner.invalidated = true;
+                inner.events.dispatch(WindowEvent::NeedRepaint);
+            }
+        }
+    }
+
     fn show(&mut self) {
         unsafe {
             let current_app = NSRunningApplication::currentApplication(nil);
