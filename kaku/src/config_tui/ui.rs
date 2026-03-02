@@ -3,7 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use super::{App, Group, Mode};
+use super::{App, Mode};
 use crate::ai_config::theme::{bg, green, muted, panel, purple, text_fg};
 
 pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
@@ -20,13 +20,11 @@ pub(super) fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
         Constraint::Fill(1),   // content
-        Constraint::Length(1), // footer
     ])
     .split(area);
 
     render_header(frame, chunks[0]);
     render_fields(frame, chunks[1], app);
-    render_footer(frame, chunks[2]);
 
     if app.mode == Mode::Selecting {
         render_selector(frame, area, app);
@@ -44,42 +42,16 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect) {
         Span::styled(" · ", Style::default().fg(muted())),
         Span::styled("Settings", Style::default().fg(text_fg())),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-fn render_footer(frame: &mut ratatui::Frame, area: Rect) {
-    let line = Line::from(vec![Span::styled(
-        "  E to edit full config · ESC to exit",
-        Style::default().fg(muted()),
-    )]);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(vec![line]), area);
 }
 
 fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let area = area.inner(Margin::new(0, 0));
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_flat: Option<usize> = None;
     let mut flat = 0usize;
-    let mut current_group: Option<Group> = None;
 
     for (idx, field) in app.fields.iter().enumerate() {
-        // Group header
-        if current_group != Some(field.group) {
-            current_group = Some(field.group);
-            if flat > 0 {
-                items.push(ListItem::new(Line::raw("")));
-                flat += 1;
-            }
-            let group_line = Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    field.group.label(),
-                    Style::default().fg(purple()).add_modifier(Modifier::BOLD),
-                ),
-            ]);
-            items.push(ListItem::new(group_line));
-            flat += 1;
-        }
-
         let is_selected = idx == app.selected;
         if is_selected {
             selected_flat = Some(flat);
@@ -89,13 +61,13 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         let has_options = field.has_options();
 
         let key_style = if is_selected {
-            Style::default().fg(purple()).add_modifier(Modifier::BOLD)
+            Style::default().fg(green()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(text_fg())
         };
 
         let value_style = if is_selected {
-            Style::default().fg(purple()).add_modifier(Modifier::BOLD)
+            Style::default().fg(green()).add_modifier(Modifier::BOLD)
         } else if field.value.is_empty() {
             Style::default().fg(muted())
         } else {
@@ -103,13 +75,18 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         };
 
         let marker = if is_selected { "› " } else { "  " };
-        let suffix = if has_options { " ▾" } else { "" };
+        // Binary (2-option) fields toggle directly; only show ▾ for multi-option popups.
+        let suffix = if has_options && field.options.len() > 2 {
+            " ▾"
+        } else {
+            ""
+        };
 
         let line = Line::from(vec![
-            Span::styled("    ", Style::default()),
+            Span::styled("  ", Style::default()),
             Span::styled(
                 marker,
-                Style::default().fg(if is_selected { purple() } else { muted() }),
+                Style::default().fg(if is_selected { green() } else { muted() }),
             ),
             Span::styled(format!("{:<20}", field.key), key_style),
             Span::styled(format!("{}{}", display_value, suffix), value_style),
@@ -118,6 +95,17 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         items.push(ListItem::new(line));
         flat += 1;
     }
+
+    // Bottom hint: not a selectable item, just a guide.
+    items.push(ListItem::new(Line::from("")));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled("    ", Style::default()),
+        Span::styled("E", Style::default().fg(text_fg())),
+        Span::styled(" open full config", Style::default().fg(muted())),
+        Span::styled("  ·  ", Style::default().fg(muted())),
+        Span::styled("ESC", Style::default().fg(text_fg())),
+        Span::styled(" save & exit", Style::default().fg(muted())),
+    ])));
 
     let mut state = ListState::default();
     state.select(selected_flat);
@@ -175,12 +163,15 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let is_sel = i == select_index;
             let marker = if is_sel { "› " } else { "  " };
             let style = if is_sel {
-                Style::default().fg(purple()).add_modifier(Modifier::BOLD)
+                Style::default().fg(green()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(text_fg())
             };
             ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(purple())),
+                Span::styled(
+                    marker,
+                    Style::default().fg(if is_sel { green() } else { muted() }),
+                ),
                 Span::styled(*opt, style),
             ]))
         })
@@ -225,7 +216,7 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let content_area = inner.inner(Margin::new(1, 0));
 
     let line = if edit_buf.is_empty() {
-        Line::from(Span::styled(" ", Style::default().bg(purple())))
+        Line::from(Span::styled(" ", Style::default().bg(green())))
     } else {
         let char_count = edit_buf.chars().count();
         // Convert char index to byte index
@@ -240,7 +231,7 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         if edit_cursor >= char_count {
             Line::from(vec![
                 Span::styled(before, Style::default().fg(text_fg())),
-                Span::styled(" ", Style::default().bg(purple())),
+                Span::styled(" ", Style::default().bg(green())),
             ])
         } else {
             let mut chars = after.chars();
@@ -251,7 +242,7 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 Span::styled(before, Style::default().fg(text_fg())),
                 Span::styled(
                     current_char.to_string(),
-                    Style::default().bg(purple()).fg(bg()),
+                    Style::default().bg(green()).fg(bg()),
                 ),
                 Span::styled(remaining, Style::default().fg(text_fg())),
             ])

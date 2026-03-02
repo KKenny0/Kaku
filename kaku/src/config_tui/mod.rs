@@ -1,13 +1,13 @@
 mod ui;
 
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use crossterm::ExecutableCommand;
-use ratatui::backend::CrosstermBackend;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -23,8 +23,10 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut app = App::new();
     app.load_config();
+    app.capture_initial_theme();
 
-    let result = run_app(&mut terminal, &mut app);
+    let (result, should_signal) = run_app(&mut terminal, &mut app);
+    let theme_changed = app.theme_changed();
 
     disable_raw_mode().context("disable raw mode")?;
     terminal
@@ -32,84 +34,142 @@ pub fn run() -> anyhow::Result<()> {
         .execute(LeaveAlternateScreen)
         .context("leave alternate screen")?;
 
+    // Signal after leaving alternate screen so the OSC reaches the main terminal.
+    if should_signal {
+        signal_config_changed();
+
+        // Update OpenCode theme if Kaku theme changed
+        if theme_changed {
+            // Clear the cached theme detection so opencode_theme_json() picks up the new setting
+            crate::ai_config::theme::clear_theme_cache();
+            update_opencode_theme();
+
+            let new_theme = app
+                .fields
+                .iter()
+                .find(|f| f.lua_key == "color_scheme")
+                .map(|f| {
+                    if f.value.is_empty() {
+                        &f.default
+                    } else {
+                        &f.value
+                    }
+                });
+            if let Some(theme) = new_theme {
+                let suggested = if theme == "Kaku Light" {
+                    "light"
+                } else {
+                    "dark"
+                };
+                eprintln!(
+                    "\x1b[90mTip: Run `/theme {}` in Claude Code to match your Kaku theme.\x1b[0m",
+                    suggested
+                );
+            }
+        }
+    }
+
     result
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-) -> anyhow::Result<()> {
+) -> (anyhow::Result<()>, bool) {
     loop {
-        terminal.draw(|f| ui::ui(f, app))?;
+        if let Err(e) = terminal.draw(|f| ui::ui(f, app)) {
+            return (Err(e.into()), false);
+        }
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+        let event = match event::read() {
+            Ok(e) => e,
+            Err(e) => return (Err(e.into()), false),
+        };
 
-            match app.mode {
-                Mode::Normal => match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => {
-                        return Ok(());
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match app.mode {
+            Mode::Normal => match key.code {
+                // Q / ESC / Ctrl+C: exit (auto-save if dirty, signal if any save occurred)
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Err(e) = app.save_if_dirty() {
+                        return (Err(e), app.has_saved);
                     }
-                    KeyCode::Esc => {
-                        return Ok(());
+                    return (Ok(()), app.has_saved);
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                    if let Err(e) = app.save_if_dirty() {
+                        return (Err(e), app.has_saved);
                     }
-                    KeyCode::Char('e') | KeyCode::Char('E') => {
-                        // Exit TUI and open config in editor
-                        disable_raw_mode().ok();
-                        terminal.clear().ok();
-                        open_config_in_editor()?;
-                        return Ok(());
+                    return (Ok(()), app.has_saved);
+                }
+                // E: open in editor (save first if dirty)
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    if let Err(e) = app.save_if_dirty() {
+                        return (Err(e), app.has_saved);
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.move_up();
+                    disable_raw_mode().ok();
+                    terminal.clear().ok();
+                    if let Err(e) = open_config_in_editor() {
+                        return (Err(e), app.has_saved);
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.move_down();
-                    }
-                    KeyCode::Enter => {
-                        app.start_edit();
-                    }
-                    _ => {}
-                },
-                Mode::Editing => match key.code {
-                    KeyCode::Esc => {
-                        app.cancel_edit();
-                    }
-                    KeyCode::Enter => {
-                        app.confirm_edit()?;
-                    }
-                    KeyCode::Backspace => {
-                        app.edit_backspace();
-                    }
-                    KeyCode::Left => {
-                        app.edit_cursor_left();
-                    }
-                    KeyCode::Right => {
-                        app.edit_cursor_right();
-                    }
-                    KeyCode::Char(c) => {
+                    return (Ok(()), app.has_saved);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.move_up();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.move_down();
+                }
+                KeyCode::Enter => {
+                    app.start_edit();
+                }
+                _ => {}
+            },
+            Mode::Editing => match key.code {
+                KeyCode::Esc => {
+                    app.cancel_edit();
+                }
+                KeyCode::Enter => {
+                    app.confirm_edit();
+                }
+                KeyCode::Backspace => {
+                    app.edit_backspace();
+                }
+                KeyCode::Left => {
+                    app.edit_cursor_left();
+                }
+                KeyCode::Right => {
+                    app.edit_cursor_right();
+                }
+                KeyCode::Char(c) => {
+                    // Ignore characters with Ctrl/Cmd modifiers to avoid inserting escape sequences
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::SUPER)
+                    {
                         app.edit_insert(c);
                     }
-                    _ => {}
-                },
-                Mode::Selecting => match key.code {
-                    KeyCode::Esc => {
-                        app.cancel_select();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.select_up();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.select_down();
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        app.confirm_select()?;
-                    }
-                    _ => {}
-                },
-            }
+                }
+                _ => {}
+            },
+            Mode::Selecting => match key.code {
+                KeyCode::Esc => {
+                    app.cancel_select();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.select_up();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.select_down();
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    app.confirm_select();
+                }
+                _ => {}
+            },
         }
     }
 }
@@ -121,27 +181,6 @@ enum Mode {
     Selecting,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Group {
-    Appearance,
-    Window,
-    Behavior,
-    TabBar,
-    Directory,
-}
-
-impl Group {
-    fn label(&self) -> &'static str {
-        match self {
-            Group::Appearance => "Appearance",
-            Group::Window => "Window",
-            Group::Behavior => "Behavior",
-            Group::TabBar => "Tab Bar",
-            Group::Directory => "Directory",
-        }
-    }
-}
-
 #[derive(Clone)]
 struct ConfigField {
     key: &'static str,
@@ -149,7 +188,6 @@ struct ConfigField {
     value: String,
     default: String,
     options: Vec<&'static str>,
-    group: Group,
     /// If true, the field's config line exists but could not be fully parsed.
     /// save_config will leave the line untouched to avoid corrupting user config.
     skip_write: bool,
@@ -167,7 +205,13 @@ struct App {
     mode: Mode,
     edit_buffer: String,
     edit_cursor: usize,
+    /// Original value before editing, used to revert on invalid input.
+    edit_original: String,
     select_index: usize,
+    dirty: bool,
+    /// True if save_config() was called at least once (for signaling on exit)
+    has_saved: bool,
+    initial_theme: String,
 }
 
 impl App {
@@ -180,7 +224,6 @@ impl App {
                 value: String::new(),
                 default: "Kaku Dark".into(),
                 options: vec!["Kaku Dark", "Kaku Light"],
-                group: Group::Appearance,
                 skip_write: false,
             },
             ConfigField {
@@ -189,7 +232,6 @@ impl App {
                 value: String::new(),
                 default: "JetBrains Mono".into(),
                 options: vec![],
-                group: Group::Appearance,
                 skip_write: false,
             },
             ConfigField {
@@ -198,7 +240,6 @@ impl App {
                 value: String::new(),
                 default: "17".into(),
                 options: vec![],
-                group: Group::Appearance,
                 skip_write: false,
             },
             ConfigField {
@@ -207,69 +248,6 @@ impl App {
                 value: String::new(),
                 default: "1.28".into(),
                 options: vec![],
-                group: Group::Appearance,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Font Ligatures",
-                lua_key: "harfbuzz_features",
-                value: String::new(),
-                default: "On".into(),
-                options: vec!["On", "Off"],
-                group: Group::Appearance,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Cursor Style",
-                lua_key: "default_cursor_style",
-                value: String::new(),
-                default: "BlinkingBar".into(),
-                options: vec![
-                    "BlinkingBar",
-                    "SteadyBar",
-                    "BlinkingBlock",
-                    "SteadyBlock",
-                    "BlinkingUnderline",
-                    "SteadyUnderline",
-                ],
-                group: Group::Appearance,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Opacity",
-                lua_key: "window_background_opacity",
-                value: String::new(),
-                default: "1.0".into(),
-                options: vec![],
-                group: Group::Appearance,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Padding",
-                lua_key: "window_padding",
-                value: String::new(),
-                default: "Auto".into(),
-                options: vec![],
-                group: Group::Appearance,
-                skip_write: false,
-            },
-            // Window
-            ConfigField {
-                key: "Shadow",
-                lua_key: "window_decorations",
-                value: String::new(),
-                default: "On".into(),
-                options: vec!["On", "Off"],
-                group: Group::Window,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Split Gap",
-                lua_key: "split_pane_gap",
-                value: String::new(),
-                default: "2".into(),
-                options: vec![],
-                group: Group::Window,
                 skip_write: false,
             },
             ConfigField {
@@ -278,73 +256,30 @@ impl App {
                 value: String::new(),
                 default: "Ctrl+Alt+Cmd+K".into(),
                 options: vec![],
-                group: Group::Window,
                 skip_write: false,
             },
-            // Behavior
+            ConfigField {
+                key: "Tab Bar Position",
+                lua_key: "tab_bar_at_bottom",
+                value: String::new(),
+                default: "Bottom".into(),
+                options: vec!["Bottom", "Top"],
+                skip_write: false,
+            },
             ConfigField {
                 key: "Copy on Select",
                 lua_key: "copy_on_select",
                 value: String::new(),
                 default: "On".into(),
                 options: vec!["On", "Off"],
-                group: Group::Behavior,
                 skip_write: false,
             },
             ConfigField {
-                key: "Scrollback Lines",
-                lua_key: "scrollback_lines",
+                key: "Shadow",
+                lua_key: "window_decorations",
                 value: String::new(),
-                default: "10000".into(),
-                options: vec![],
-                group: Group::Behavior,
-                skip_write: false,
-            },
-            // Tab Bar
-            ConfigField {
-                key: "Show",
-                lua_key: "hide_tab_bar_if_only_one_tab",
-                value: String::new(),
-                default: "Auto".into(),
-                options: vec!["Auto", "Always"],
-                group: Group::TabBar,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Position",
-                lua_key: "tab_bar_at_bottom",
-                value: String::new(),
-                default: "Bottom".into(),
-                options: vec!["Bottom", "Top"],
-                group: Group::TabBar,
-                skip_write: false,
-            },
-            // Directory
-            ConfigField {
-                key: "Window Inherit",
-                lua_key: "window_inherit_working_directory",
-                value: String::new(),
-                default: "Off".into(),
-                options: vec!["Off", "On"],
-                group: Group::Directory,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Tab Inherit",
-                lua_key: "tab_inherit_working_directory",
-                value: String::new(),
-                default: "Off".into(),
-                options: vec!["Off", "On"],
-                group: Group::Directory,
-                skip_write: false,
-            },
-            ConfigField {
-                key: "Split Inherit",
-                lua_key: "split_pane_inherit_working_directory",
-                value: String::new(),
-                default: "Off".into(),
-                options: vec!["Off", "On"],
-                group: Group::Directory,
+                default: "On".into(),
+                options: vec!["On", "Off"],
                 skip_write: false,
             },
         ];
@@ -355,8 +290,34 @@ impl App {
             mode: Mode::Normal,
             edit_buffer: String::new(),
             edit_cursor: 0,
+            edit_original: String::new(),
             select_index: 0,
+            dirty: false,
+            has_saved: false,
+            initial_theme: String::new(),
         }
+    }
+
+    fn capture_initial_theme(&mut self) {
+        if let Some(field) = self.fields.iter().find(|f| f.lua_key == "color_scheme") {
+            self.initial_theme = if field.value.is_empty() {
+                field.default.clone()
+            } else {
+                field.value.clone()
+            };
+        }
+    }
+
+    fn theme_changed(&self) -> bool {
+        if let Some(field) = self.fields.iter().find(|f| f.lua_key == "color_scheme") {
+            let current = if field.value.is_empty() {
+                &field.default
+            } else {
+                &field.value
+            };
+            return current != &self.initial_theme;
+        }
+        false
     }
 
     fn load_config(&mut self) {
@@ -494,15 +455,74 @@ impl App {
         s[..result_end].trim().to_string()
     }
 
+    fn extract_table_quoted_value(raw: &str, key: &str) -> Option<String> {
+        let needle = format!("{key} = ");
+        let start = raw.find(&needle)? + needle.len();
+        let rest = raw[start..].trim_start();
+        let quote = rest.chars().next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        let inner = &rest[1..];
+        let end = inner.find(quote)?;
+        Some(inner[..end].to_string())
+    }
+
+    fn normalize_hotkey_table(raw: &str) -> Option<String> {
+        let key = Self::extract_table_quoted_value(raw, "key")?;
+        let mods = Self::extract_table_quoted_value(raw, "mods").unwrap_or_default();
+        let mut parts: Vec<String> = Vec::new();
+        for token in mods.split('|') {
+            match token.trim().to_ascii_uppercase().as_str() {
+                "CTRL" | "CONTROL" => parts.push("Ctrl".to_string()),
+                "ALT" | "OPT" | "OPTION" => parts.push("Alt".to_string()),
+                "SUPER" | "CMD" | "COMMAND" => parts.push("Cmd".to_string()),
+                "SHIFT" => parts.push("Shift".to_string()),
+                _ => {}
+            }
+        }
+        parts.push(key.to_ascii_uppercase());
+        Some(parts.join("+"))
+    }
+
+    fn hotkey_to_lua(value: &str) -> Option<String> {
+        let parts: Vec<&str> = value
+            .split('+')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let key = parts.last()?.to_ascii_uppercase();
+        let mut mods: Vec<&str> = Vec::new();
+        for token in &parts[..parts.len() - 1] {
+            match token.to_ascii_uppercase().as_str() {
+                "CTRL" | "CONTROL" => mods.push("CTRL"),
+                "ALT" | "OPT" | "OPTION" => mods.push("ALT"),
+                "CMD" | "SUPER" | "COMMAND" => mods.push("SUPER"),
+                "SHIFT" => mods.push("SHIFT"),
+                _ => {}
+            }
+        }
+        if mods.is_empty() {
+            return None;
+        }
+
+        Some(format!(
+            "{{ key = '{}', mods = '{}' }}",
+            key,
+            mods.join("|")
+        ))
+    }
+
     /// Converts a raw Lua value string into the TUI's internal display format.
     /// Returns None when the value exists but cannot be parsed into a supported
     /// format; the caller should set skip_write=true to protect the original line.
     fn normalize_value(lua_key: &str, raw: &str) -> Option<String> {
         match lua_key {
-            "copy_on_select"
-            | "window_inherit_working_directory"
-            | "tab_inherit_working_directory"
-            | "split_pane_inherit_working_directory" => Some(if raw == "true" {
+            "copy_on_select" => Some(if raw == "true" {
                 "On".into()
             } else {
                 "Off".into()
@@ -522,30 +542,23 @@ impl App {
             } else {
                 "On".into()
             }),
-            "window_padding" => {
-                // Accept the TUI's own "L R T B" space-separated px format.
-                // Also parse Lua table format: { left = '40px', right = '40px', ... }
-                let parts: Vec<&str> = raw.split_whitespace().collect();
-                if parts.len() == 4 && parts.iter().all(|p| p.parse::<f64>().is_ok()) {
-                    return Some(raw.to_string());
-                }
-                // Try to extract numeric px values from a Lua table literal.
-                let extract_px = |key: &str| -> Option<String> {
-                    let needle = format!("{} = '", key);
-                    let start = raw.find(&needle)? + needle.len();
-                    let rest = &raw[start..];
-                    let end = rest.find("px'")?;
-                    Some(rest[..end].to_string())
-                };
-                if let (Some(l), Some(r), Some(t), Some(b)) = (
-                    extract_px("left"),
-                    extract_px("right"),
-                    extract_px("top"),
-                    extract_px("bottom"),
-                ) {
-                    Some(format!("{} {} {} {}", l, r, t, b))
+            "window_decorations" => {
+                let value = raw.trim().trim_matches('\'').trim_matches('"');
+                if value.contains("MACOS_FORCE_DISABLE_SHADOW") {
+                    Some("Off".into())
+                } else if value.contains("INTEGRATED_BUTTONS|RESIZE") {
+                    Some("On".into())
                 } else {
-                    // Unrecognized format — signal caller to set skip_write.
+                    None
+                }
+            }
+            "macos_global_hotkey" => {
+                let value = raw.trim();
+                if value.eq_ignore_ascii_case("nil") {
+                    Some(String::new())
+                } else if value.starts_with('{') {
+                    Self::normalize_hotkey_table(value)
+                } else {
                     None
                 }
             }
@@ -568,23 +581,54 @@ impl App {
     }
 
     fn move_down(&mut self) {
-        if self.selected < self.fields.len() - 1 {
+        if self.selected + 1 < self.item_count() {
             self.selected += 1;
         }
+    }
+
+    fn item_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Save config if there are pending changes. Returns Err on save failure.
+    fn save_if_dirty(&mut self) -> anyhow::Result<()> {
+        if self.dirty {
+            self.save_config()?;
+            self.dirty = false;
+            self.has_saved = true;
+        }
+        Ok(())
     }
 
     fn start_edit(&mut self) {
         let field = &self.fields[self.selected];
         if field.has_options() {
-            self.mode = Mode::Selecting;
-            let current = self.display_value(field);
-            self.select_index = field
-                .options
-                .iter()
-                .position(|&o| o == current)
-                .unwrap_or(0);
+            if field.options.len() == 2 {
+                // Binary field: toggle directly without a popup.
+                let current = self.display_value(field);
+                let current_idx = field
+                    .options
+                    .iter()
+                    .position(|&o| o == current)
+                    .unwrap_or(0);
+                let next_idx = (current_idx + 1) % 2;
+                let next_value = field.options[next_idx].to_string();
+                self.fields[self.selected].value = next_value;
+                self.fields[self.selected].skip_write = false;
+                self.dirty = true;
+            } else {
+                self.mode = Mode::Selecting;
+                let current = self.display_value(field);
+                self.select_index = field
+                    .options
+                    .iter()
+                    .position(|&o| o == current)
+                    .unwrap_or(0);
+            }
         } else {
             self.mode = Mode::Editing;
+            // Remember original value to revert on invalid input
+            self.edit_original = field.value.clone();
             self.edit_buffer = if field.value.is_empty() {
                 field.default.clone()
             } else {
@@ -616,26 +660,35 @@ impl App {
         }
     }
 
-    fn confirm_edit(&mut self) -> anyhow::Result<()> {
-        let new_value = self.edit_buffer.clone();
+    fn confirm_edit(&mut self) {
+        let mut new_value = self.edit_buffer.clone();
+        let field = &self.fields[self.selected];
+
+        // Validate hotkey input: if invalid, revert to original value
+        // so UI display matches what will be saved to file.
+        if field.lua_key == "macos_global_hotkey"
+            && !new_value.is_empty()
+            && Self::hotkey_to_lua(&new_value).is_none()
+        {
+            new_value = self.edit_original.clone();
+        }
+
         self.fields[self.selected].value = new_value;
         // User explicitly set a value: allow it to be written even if the field
         // was previously marked unwritable due to an unrecognized format.
         self.fields[self.selected].skip_write = false;
         self.mode = Mode::Normal;
         self.edit_buffer.clear();
-        self.save_config()?;
-        Ok(())
+        self.dirty = true;
     }
 
-    fn confirm_select(&mut self) -> anyhow::Result<()> {
+    fn confirm_select(&mut self) {
         let selected_option = self.fields[self.selected].options[self.select_index];
         self.fields[self.selected].value = selected_option.to_string();
         // Same: explicit user choice overrides the skip_write protection.
         self.fields[self.selected].skip_write = false;
         self.mode = Mode::Normal;
-        self.save_config()?;
-        Ok(())
+        self.dirty = true;
     }
 
     fn edit_backspace(&mut self) {
@@ -689,7 +742,10 @@ impl App {
                 continue;
             }
             let is_default = field.value.is_empty() || field.value == field.default;
-            if is_default {
+            // Keep tab bar position explicit so switching back to Bottom
+            // does not depend on removing a line and inheriting bundled defaults.
+            let always_write = field.lua_key == "tab_bar_at_bottom";
+            if is_default && !always_write {
                 // Remove the config line if it exists
                 content = self.remove_lua_config(&content, field.lua_key);
             } else {
@@ -698,19 +754,26 @@ impl App {
             }
         }
 
-        // Write with sync to ensure file watcher detects change immediately
-        use std::io::Write;
-        let mut file = std::fs::File::create(&config_path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-
-        // Invalidate the cached theme detection so the TUI re-renders with updated colors.
-        crate::ai_config::theme::invalidate_theme_cache();
-
-        // Brief delay to allow Kaku GUI's file watcher to detect the change
-        // and reload the configuration before the TUI re-renders.
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Atomic write: write to a temp file then rename so the file watcher
+        // always sees a fully-written config (never a truncated intermediate).
+        //
+        // Resolve symlinks so we write through to the real file rather than
+        // replacing the symlink itself (which would break dotfile workflows).
+        let real_path = std::fs::canonicalize(&config_path).unwrap_or(config_path);
+        // Preserve the original file's permissions on the replacement.
+        let original_perms = std::fs::metadata(&real_path).ok().map(|m| m.permissions());
+        let temp_path = real_path.with_extension("lua.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            // Set permissions after writing to avoid failure if original was read-only.
+            if let Some(perms) = original_perms {
+                let _ = file.set_permissions(perms);
+            }
+        }
+        std::fs::rename(&temp_path, &real_path)?;
 
         Ok(())
     }
@@ -856,15 +919,10 @@ impl App {
         match field.lua_key {
             "color_scheme" => format!("'{}'", field.value),
             "font" => format!("wezterm.font('{}')", field.value),
-            "font_size"
-            | "line_height"
-            | "window_background_opacity"
-            | "split_pane_gap"
-            | "scrollback_lines" => field.value.clone(),
-            "copy_on_select"
-            | "window_inherit_working_directory"
-            | "tab_inherit_working_directory"
-            | "split_pane_inherit_working_directory" => {
+            "font_size" | "line_height" | "window_background_opacity" | "split_pane_gap" => {
+                field.value.clone()
+            }
+            "copy_on_select" => {
                 if field.value == "On" {
                     "true".into()
                 } else {
@@ -879,7 +937,12 @@ impl App {
                 }
             }
             "tab_bar_at_bottom" => {
-                if field.value == "Bottom" {
+                let effective = if field.value.is_empty() {
+                    &field.default
+                } else {
+                    &field.value
+                };
+                if effective == "Bottom" {
                     "true".into()
                 } else {
                     "false".into()
@@ -890,21 +953,6 @@ impl App {
                     "{}".into()
                 } else {
                     "{ 'calt=0', 'clig=0', 'liga=0' }".into()
-                }
-            }
-            "default_cursor_style" => format!("'{}'", field.value),
-            "window_padding" => {
-                if field.value == "Auto" || field.value.is_empty() {
-                    return "nil".into();
-                }
-                let parts: Vec<&str> = field.value.split_whitespace().collect();
-                if parts.len() == 4 {
-                    format!(
-                        "{{ left = '{}px', right = '{}px', top = '{}px', bottom = '{}px' }}",
-                        parts[0], parts[1], parts[2], parts[3]
-                    )
-                } else {
-                    "nil".into()
                 }
             }
             "window_decorations" => {
@@ -918,27 +966,8 @@ impl App {
                 if field.value.is_empty() {
                     "nil".into()
                 } else {
-                    // Parse Ctrl+Alt+Cmd+K format
-                    let parts: Vec<&str> = field.value.split('+').collect();
-                    if let Some(key) = parts.last() {
-                        let mut mods = Vec::new();
-                        for p in &parts[..parts.len() - 1] {
-                            match p.to_uppercase().as_str() {
-                                "CTRL" | "CONTROL" => mods.push("CTRL"),
-                                "ALT" | "OPT" | "OPTION" => mods.push("ALT"),
-                                "CMD" | "SUPER" | "COMMAND" => mods.push("SUPER"),
-                                "SHIFT" => mods.push("SHIFT"),
-                                _ => {}
-                            }
-                        }
-                        format!(
-                            "{{ key = '{}', mods = '{}' }}",
-                            key.to_uppercase(),
-                            mods.join("|")
-                        )
-                    } else {
-                        "nil".into()
-                    }
+                    // confirm_edit() already validated; nil is a defensive fallback.
+                    Self::hotkey_to_lua(&field.value).unwrap_or_else(|| "nil".into())
                 }
             }
             _ => format!("'{}'", field.value),
@@ -1023,4 +1052,75 @@ fn open_config_in_editor() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Send an OSC 1337 SetUserVar to signal kaku-gui that config has changed.
+/// This triggers an immediate config reload instead of waiting for the file watcher.
+fn signal_config_changed() {
+    use std::io::Write;
+    // OSC 1337 ; SetUserVar=name=base64(value) ST
+    // name: KAKU_CONFIG_CHANGED, value: "1" -> base64 "MQ=="
+    let seq = if std::env::var("TMUX").is_ok() {
+        // tmux passthrough: wrap OSC in DCS tmux; ... ST
+        b"\x1bPtmux;\x1b\x1b]1337;SetUserVar=KAKU_CONFIG_CHANGED=MQ==\x07\x1b\\" as &[u8]
+    } else {
+        b"\x1b]1337;SetUserVar=KAKU_CONFIG_CHANGED=MQ==\x07" as &[u8]
+    };
+    let _ = std::io::stdout().write_all(seq);
+    let _ = std::io::stdout().flush();
+}
+
+/// Update the OpenCode theme file to match the current Kaku theme.
+fn update_opencode_theme() {
+    let opencode_dir = config::HOME_DIR.join(".config").join("opencode");
+    let themes_dir = opencode_dir.join("themes");
+    let new_theme_file = themes_dir.join("kaku-match.json");
+    let legacy_theme_file = themes_dir.join("wezterm-match.json");
+
+    // Prefer new name, fall back to legacy name for old users
+    let theme_file = if new_theme_file.exists() {
+        new_theme_file
+    } else if legacy_theme_file.exists() {
+        legacy_theme_file
+    } else {
+        return;
+    };
+
+    let theme_content = crate::ai_config::opencode_theme_json();
+    if let Err(e) = std::fs::write(&theme_file, theme_content) {
+        eprintln!(
+            "\x1b[33mWarning: Failed to update OpenCode theme: {}\x1b[0m",
+            e
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    #[test]
+    fn tab_bar_at_bottom_uses_default_when_value_is_empty() {
+        let app = App::new();
+        let field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "tab_bar_at_bottom")
+            .expect("tab_bar_at_bottom field to exist");
+
+        assert_eq!(app.to_lua_value(field), "true");
+    }
+
+    #[test]
+    fn tab_bar_at_bottom_respects_explicit_top_selection() {
+        let mut app = App::new();
+        let idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "tab_bar_at_bottom")
+            .expect("tab_bar_at_bottom field to exist");
+        app.fields[idx].value = "Top".to_string();
+
+        assert_eq!(app.to_lua_value(&app.fields[idx]), "false");
+    }
 }

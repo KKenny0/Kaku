@@ -60,7 +60,6 @@ fn detect_light_theme_from_config() -> bool {
 }
 
 // Cache the theme detection result for the process lifetime.
-// Invalidated by `invalidate_theme_cache()` after the user saves new settings.
 static LIGHT_THEME_CACHE: Mutex<Option<bool>> = Mutex::new(None);
 
 pub fn is_light_theme() -> bool {
@@ -73,8 +72,9 @@ pub fn is_light_theme() -> bool {
     v
 }
 
-/// Call after writing a new config so the next render picks up the updated theme.
-pub fn invalidate_theme_cache() {
+/// Clear the cached theme detection result so that the next call to
+/// `is_light_theme()` re-reads the config file.
+pub fn clear_theme_cache() {
     *LIGHT_THEME_CACHE.lock().unwrap() = None;
 }
 
@@ -95,10 +95,10 @@ static LIGHT_THEME: LazyLock<Theme> = LazyLock::new(|| Theme {
     secondary: parse_hex("#24837B"),
     accent: parse_hex("#8C6D00"),
     error: parse_hex("#AF3029"),
-    text: parse_hex("#100F0F"),
-    muted: parse_hex("#5C5B56"),
+    text: parse_hex("#403E3C"),
+    muted: parse_hex("#6F6E69"),
     bg: parse_hex("#FFFCF0"),
-    panel: parse_hex("#E8E6DB"),
+    panel: parse_hex("#F2F0E5"),
 });
 
 fn current_theme() -> &'static Theme {
