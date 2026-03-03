@@ -2776,6 +2776,33 @@ fn get_window_class() -> &'static Class {
             }
         }
 
+        /// Override constrainFrameRect:toScreen: to allow window management tools
+        /// (like Raycast) to maximize windows properly without resize increments
+        /// preventing the window from filling the screen completely.
+        /// <https://github.com/tw93/Kaku/issues/131>
+        extern "C" fn constrain_frame_rect(
+            this: &mut Object,
+            _sel: Sel,
+            frame_rect: NSRect,
+            screen: id,
+        ) -> NSRect {
+            if screen.is_null() {
+                return frame_rect;
+            }
+            unsafe {
+                let visible_frame: NSRect = msg_send![screen, visibleFrame];
+                let width_diff = (frame_rect.size.width - visible_frame.size.width).abs();
+                let height_diff = (frame_rect.size.height - visible_frame.size.height).abs();
+                // If the frame is very close to the screen's visible frame size,
+                // return the visible frame to bypass resize increment constraints.
+                if width_diff < 50.0 && height_diff < 50.0 {
+                    return visible_frame;
+                }
+                // Otherwise, call super to apply normal constraints
+                msg_send![super(this, class!(NSWindow)), constrainFrameRect:frame_rect toScreen:screen]
+            }
+        }
+
         unsafe {
             cls.add_method(
                 sel!(canBecomeKeyWindow),
@@ -2788,6 +2815,10 @@ fn get_window_class() -> &'static Class {
             cls.add_method(
                 sel!(toggleFullScreen:),
                 redirect_toggle_fullscreen as extern "C" fn(&mut Object, Sel, id),
+            );
+            cls.add_method(
+                sel!(constrainFrameRect:toScreen:),
+                constrain_frame_rect as extern "C" fn(&mut Object, Sel, NSRect, id) -> NSRect,
             );
         }
 
