@@ -2503,8 +2503,9 @@ local kaku_light = {
 
   -- Override Claude Code quote background for better contrast
   color_overrides = {
-    ['#575653'] = '#E0DED8',  -- ANSI 7 (white)
-    ['#585754'] = '#E0DED8',  -- Claude Code true color
+    ['#575653'] = '#F2F0EB',  -- ANSI 7 (white)
+    ['#585754'] = '#F2F0EB',  -- Claude Code true color
+    ['#2360A6'] = '#DDE4EB',  -- Claude Code blue header background
   },
 }
 
