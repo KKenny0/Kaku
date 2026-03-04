@@ -468,7 +468,7 @@ pub struct TabInformation {
 
 impl UserData for TabInformation {
     fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("tab_id", |_, this| Ok(this.tab_id));
+        fields.add_field_method_get("tab_id", |_, this| Ok(this.tab_id.as_usize()));
         fields.add_field_method_get("tab_index", |_, this| Ok(this.tab_index));
         fields.add_field_method_get("is_active", |_, this| Ok(this.is_active));
         fields.add_field_method_get("is_last_active", |_, this| Ok(this.is_last_active));
@@ -524,7 +524,7 @@ pub struct PaneInformation {
 
 impl UserData for PaneInformation {
     fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
-        fields.add_field_method_get("pane_id", |_, this| Ok(this.pane_id));
+        fields.add_field_method_get("pane_id", |_, this| Ok(this.pane_id.as_usize()));
         fields.add_field_method_get("pane_index", |_, this| Ok(this.pane_index));
         fields.add_field_method_get("is_active", |_, this| Ok(this.is_active));
         fields.add_field_method_get("is_zoomed", |_, this| Ok(this.is_zoomed));

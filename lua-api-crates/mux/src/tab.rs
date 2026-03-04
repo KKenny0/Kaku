@@ -22,7 +22,7 @@ impl UserData for MuxTab {
                 libc::getpid()
             }))
         });
-        methods.add_method("tab_id", |_, this, _: ()| Ok(this.0));
+        methods.add_method("tab_id", |_, this, _: ()| Ok(this.0.as_usize()));
         methods.add_method("window", |_, this, _: ()| {
             let mux = get_mux()?;
             for window_id in mux.iter_windows() {

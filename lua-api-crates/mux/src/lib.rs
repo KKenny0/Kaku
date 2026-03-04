@@ -84,9 +84,9 @@ pub fn register(lua: &Lua) -> anyhow::Result<()> {
 
     mux_mod.set(
         "get_pane",
-        lua.create_function(|_, pane_id: PaneId| {
+        lua.create_function(|_, pane_id: usize| {
             let mux = get_mux()?;
-            let pane = MuxPane(pane_id);
+            let pane = MuxPane(PaneId::from(pane_id));
             pane.resolve(&mux)?;
             Ok(pane)
         })?,
@@ -94,9 +94,9 @@ pub fn register(lua: &Lua) -> anyhow::Result<()> {
 
     mux_mod.set(
         "get_tab",
-        lua.create_function(|_, tab_id: TabId| {
+        lua.create_function(|_, tab_id: usize| {
             let mux = get_mux()?;
-            let tab = MuxTab(tab_id);
+            let tab = MuxTab(TabId::from(tab_id));
             tab.resolve(&mux)?;
             Ok(tab)
         })?,

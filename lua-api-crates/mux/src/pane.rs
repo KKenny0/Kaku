@@ -91,7 +91,7 @@ impl UserData for MuxPane {
                 libc::getpid()
             }))
         });
-        methods.add_method("pane_id", |_, this, _: ()| Ok(this.0));
+        methods.add_method("pane_id", |_, this, _: ()| Ok(this.0.as_usize()));
 
         methods.add_async_method("split", |_, this, args: Option<SplitPane>| async move {
             args.unwrap_or_default().run(this).await

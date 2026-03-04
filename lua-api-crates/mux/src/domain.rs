@@ -20,7 +20,7 @@ impl UserData for MuxDomain {
                 libc::getpid()
             }))
         });
-        methods.add_method("domain_id", |_, this, _: ()| Ok(this.0));
+        methods.add_method("domain_id", |_, this, _: ()| Ok(this.0.as_usize()));
 
         methods.add_method("is_spawnable", |_, this, _: ()| {
             let mux = get_mux()?;
