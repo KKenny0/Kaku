@@ -879,7 +879,7 @@ pub struct Config {
     pub bell_tab_indicator: bool,
 
     /// Show a badge on the Dock icon when bell fires in unfocused window
-    #[dynamic(default = "default_true")]
+    #[dynamic(default)]
     pub bell_dock_badge: bool,
 
     #[dynamic(default)]

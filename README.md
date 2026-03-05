@@ -20,6 +20,7 @@
 ## Features
 
 - **Zero Config**: Defaults with JetBrains Mono, opencode theme, macOS font rendering, and low-res font sizing.
+- **Theme-Aware Experience**: Built-in dark/light themes with tuned selection colors, font weight, and practical color overrides support.
 - **Curated Shell Suite**: Built-in zsh plugins with optional CLI tools for prompt, diff, and navigation workflows.
 - **Fast & Lightweight**: 40% smaller binary, instant startup, lazy loading, stripped-down GPU-accelerated core.
 - **WezTerm-Compatible Config**: Use WezTerm's Lua config directly with full API compatibility and no migration.
@@ -48,6 +49,8 @@ Kaku comes with intuitive macOS-native shortcuts:
 | Toggle Split Direction | `Cmd + Shift + S` |
 | Zoom/Unzoom Pane | `Cmd + Shift + Enter` |
 | Resize Pane | `Cmd + Ctrl + Arrows` |
+| Open Settings Panel | `Cmd + ,` |
+| Reopen Closed Tab | `Cmd + Shift + T` |
 | Clear Screen | `Cmd + K` |
 | Doctor Panel | `Ctrl + Shift + L` |
 | Kaku AI Settings | `Cmd + Shift + A` |
@@ -61,7 +64,8 @@ Kaku comes with intuitive macOS-native shortcuts:
 
 ### Intuitive Interactions
 
-- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks finish.
+- **Visual Bell**: A blinking dot appears on inactive tabs when background tasks finish. Optional Dock badge is controlled by `bell_dock_badge` (off by default); tab dots use `bell_tab_indicator`.
+- **File Path Hyperlinks**: Relative and home-based file paths in terminal output become clickable links.
 - **Active Pane**: A subtle dot highlights the currently focused pane during split-screen workflows.
 - **Global Hotkey**: Press `Cmd + Opt + Ctrl + K` anytime to float Kaku over your current workspace.
 - **Copy on Select**: Highlighting any text automatically copies it to your clipboard with a confirmation toast.
@@ -89,6 +93,16 @@ Optional CLI tools installed via Homebrew during `kaku init`:
 
 Kaku uses `~/.config/kaku/kaku.lua` for configuration, fully compatible with WezTerm's Lua API, with built-in defaults at `Kaku.app/Contents/Resources/kaku.lua` as fallback.
 
+Run `kaku config` or press `Cmd + ,` to open the Settings TUI and edit common options (font, theme, opacity, bells) without manually editing Lua.
+
+You can also remap true-color output from specific apps to keep theme consistency:
+
+```lua
+config.color_overrides = {
+  ['#6E6E6E'] = '#3A3942',
+}
+```
+
 Run `kaku` in your terminal to see all available commands such as `kaku ai`, `kaku config`, `kaku doctor`, `kaku update`, and `kaku reset`.
 
 ## Kaku AI
@@ -98,7 +112,8 @@ Kaku includes a built-in assistant for command-line error recovery and a unified
 - **Kaku Assistant**: Automatically analyzes failed commands and prepares a safe command suggestion.
 - **AI Tools Config**: Manage settings for tools like Claude Code, Codex, Gemini CLI, Copilot CLI, Factory Droid, OpenCode, and OpenClaw.
 
-Open AI settings with `kaku ai`, then configure **Kaku Assistant** (enable, model, base URL, API key, custom headers) and your external AI tools in one place.
+Open AI settings with `kaku ai`, then configure **Kaku Assistant** (enable, model, base URL, API key) and your external AI tools in one place.
+For enterprise gateway/proxy headers, edit `~/.config/kaku/assistant.toml` and set `custom_headers` there.
 
 Tip: DeepSeek-V3.2 is a great low-cost option to start with for everyday AI coding tasks.
 

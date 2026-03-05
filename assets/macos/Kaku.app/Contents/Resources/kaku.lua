@@ -1167,6 +1167,41 @@ local function is_non_actionable_ai_command(command)
   return false
 end
 
+local function should_skip_ai_fix_for_failed_command(failed_command, exit_code)
+  local normalized = trim_surrounding_whitespace(failed_command or "")
+  if normalized == "" then
+    return true
+  end
+
+  local lower = normalized:lower()
+
+  -- Treat explicit help/usage intent as non-errors for AI suggestions.
+  if lower:match("%-%-help") or lower:match("%s%-h%s*$") or lower:match("%f[%w]help%f[%W]") then
+    return true
+  end
+
+  -- Some package managers print usage and may return non-zero for bare invocation.
+  -- Avoid noisy suggestions for these common entry commands.
+  local bare_cmd = lower:match("^([%w%._%-%/]+)%s*$")
+  if bare_cmd and (
+      bare_cmd == "tnpm"
+      or bare_cmd == "npm"
+      or bare_cmd == "pnpm"
+      or bare_cmd == "yarn"
+      or bare_cmd == "pip"
+      or bare_cmd == "pip3"
+    ) then
+    return true
+  end
+
+  -- git pull conflicts are an expected workflow state; avoid auto-fix noise.
+  if lower:match("^git%s+pull(%s|$)") and exit_code ~= 0 then
+    return true
+  end
+
+  return false
+end
+
 local function parse_ai_fix_result(content)
   local parsed = parse_json_object_from_text(content or "")
   if type(parsed) == "table" then
@@ -2125,6 +2160,10 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   local failed_command = trim_surrounding_whitespace(vars.kaku_last_cmd or "")
   if failed_command == "" then
     ai_debug_log("user-var-changed ignored missing kaku_last_cmd")
+    return
+  end
+  if should_skip_ai_fix_for_failed_command(failed_command, exit_code) then
+    ai_debug_log("user-var-changed skipped by non-error command policy")
     return
   end
   ai_debug_log("user-var-changed failed_command=" .. failed_command .. " exit=" .. tostring(exit_code))

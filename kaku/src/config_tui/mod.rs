@@ -294,7 +294,7 @@ impl App {
                 key: "Bell Dock Badge",
                 lua_key: "bell_dock_badge",
                 value: String::new(),
-                default: "On".into(),
+                default: "Off".into(),
                 options: vec!["On", "Off"],
                 skip_write: false,
             },
