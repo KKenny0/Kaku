@@ -2313,7 +2313,10 @@ impl TermWindow {
         // Recreate texture atlas to ensure subpixel AA and font rendering changes
         // correctly flush out the old cached glyphs when theme changes.
         if let Err(err) = self.recreate_texture_atlas(None) {
-            log::error!("recreate_texture_atlas after config reload failed: {:#}", err);
+            log::error!(
+                "recreate_texture_atlas after config reload failed: {:#}",
+                err
+            );
         }
 
         if let Some(window) = mux.get_window(self.mux_window_id) {
