@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check build app dev check test install-tools test-webgpu-fallback
+.PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback
 
 all: build
 
@@ -48,10 +48,25 @@ fmt-check:
 	@echo "Format check passed."
 
 install-tools:
+	@if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then \
+		echo "Rust toolchain not found. Install rustup first, then re-run make install-tools."; \
+		echo "See CONTRIBUTING.md for the bootstrap steps."; \
+		exit 1; \
+	fi
 	cargo install cargo-nextest --locked
 	cargo install cargo-watch --locked
-	rustup toolchain install nightly --component rustfmt
+	rustup toolchain install nightly --profile minimal --component rustfmt
 	@echo "Tools installed."
+
+install-hooks:
+	@if [ ! -d .git ]; then \
+		echo "install-hooks must be run from a git checkout."; \
+		exit 1; \
+	fi
+	@mkdir -p .git/hooks
+	@printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exec make fmt-check test' > .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Installed pre-commit hook at .git/hooks/pre-commit"
 
 test-webgpu-fallback:
 	./scripts/test_webgpu_fallback.sh --strict

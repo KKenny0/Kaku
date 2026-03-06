@@ -7,7 +7,13 @@
 git clone https://github.com/tw93/Kaku.git
 cd Kaku
 
-# Install required tools (cargo-nextest, nightly rustfmt)
+# Install Rust if it isn't already available (Homebrew keeps rustup keg-only)
+brew install rustup
+echo 'export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"' >> ~/.zprofile
+exec zsh -l
+rustup default 1.93.0
+
+# Install required tools (cargo-nextest, cargo-watch, nightly rustfmt)
 make install-tools
 
 # Install pre-commit hook (format + test before each commit)

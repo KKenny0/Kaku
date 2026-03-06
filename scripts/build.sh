@@ -65,6 +65,15 @@ resolve_build_targets() {
 	esac
 }
 
+require_command() {
+	if ! command -v "$1" >/dev/null 2>&1; then
+		echo "Missing required command: $1" >&2
+		echo "Install the Rust toolchain bootstrap first, then retry." >&2
+		echo "See CONTRIBUTING.md for setup instructions." >&2
+		exit 1
+	fi
+}
+
 ensure_rust_targets() {
 	local installed
 	local missing=()
@@ -89,6 +98,9 @@ for arg in "$@"; do
 	--native-arch) BUILD_ARCH="native" ;;
 	esac
 done
+
+require_command cargo
+require_command rustup
 
 APP_BUNDLE_SRC="assets/macos/Kaku.app"
 APP_BUNDLE_OUT="$OUT_DIR/$APP_NAME.app"
