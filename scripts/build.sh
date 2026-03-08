@@ -20,6 +20,7 @@ OUT_DIR="${OUT_DIR:-dist}"
 OPEN_APP="${OPEN_APP:-0}"
 APP_ONLY="${APP_ONLY:-0}"
 BUILD_ARCH="${BUILD_ARCH:-}"
+KAKU_REQUIRE_SIGNED_RELEASE="${KAKU_REQUIRE_SIGNED_RELEASE:-0}"
 
 if [[ -z "$BUILD_ARCH" ]]; then
 	if [[ "$PROFILE" == "release" || "$PROFILE" == "release-opt" ]]; then
@@ -226,6 +227,10 @@ else
 	if [[ "$SIGNING_IDENTITY" != "-" ]]; then
 		echo "Release build: signing with developer certificate"
 	else
+		if [[ "$KAKU_REQUIRE_SIGNED_RELEASE" == "1" ]]; then
+			echo "Error: release build requires KAKU_SIGNING_IDENTITY with a Developer ID certificate" >&2
+			exit 1
+		fi
 		echo "Release build: using ad-hoc signing (set KAKU_SIGNING_IDENTITY for developer certificate)"
 	fi
 fi

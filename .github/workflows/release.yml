@@ -14,6 +14,12 @@ jobs:
       contents: write
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      KAKU_SIGNING_IDENTITY: ${{ secrets.KAKU_SIGNING_IDENTITY }}
+      KAKU_CERTIFICATE_P12: ${{ secrets.KAKU_CERTIFICATE_P12 }}
+      KAKU_CERTIFICATE_PASSWORD: ${{ secrets.KAKU_CERTIFICATE_PASSWORD }}
+      KAKU_NOTARIZE_APPLE_ID: ${{ secrets.KAKU_NOTARIZE_APPLE_ID }}
+      KAKU_NOTARIZE_TEAM_ID: ${{ secrets.KAKU_NOTARIZE_TEAM_ID }}
+      KAKU_NOTARIZE_PASSWORD: ${{ secrets.KAKU_NOTARIZE_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -22,16 +28,85 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: 1.93.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@f092c064826410a38929a5791d2c0225b94432fe # nextest
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(grep '^version =' kaku/Cargo.toml | head -n 1 | cut -d '"' -f2)"
+          gui_version="$(grep '^version =' kaku-gui/Cargo.toml | head -n 1 | cut -d '"' -f2)"
+
+          if [[ "$cargo_version" != "$gui_version" ]]; then
+            echo "Version mismatch between kaku ($cargo_version) and kaku-gui ($gui_version)" >&2
+            exit 1
+          fi
+
+          require_release_prereqs=false
+          version="$cargo_version"
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#V}"
+            version="${version#v}"
+            require_release_prereqs=true
+
+            if [[ "$version" != "$cargo_version" ]]; then
+              echo "Tag version ($version) does not match kaku/Cargo.toml ($cargo_version)" >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "require_release_prereqs=$require_release_prereqs" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release prerequisites
+        if: steps.release_meta.outputs.require_release_prereqs == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_vars=(
+            KAKU_SIGNING_IDENTITY
+            KAKU_CERTIFICATE_P12
+            KAKU_CERTIFICATE_PASSWORD
+            KAKU_NOTARIZE_APPLE_ID
+            KAKU_NOTARIZE_TEAM_ID
+            KAKU_NOTARIZE_PASSWORD
+            HOMEBREW_TAP_TOKEN
+          )
+
+          for var_name in "${required_vars[@]}"; do
+            if [[ -z "${!var_name:-}" ]]; then
+              echo "Missing required release secret: $var_name" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$KAKU_SIGNING_IDENTITY" != Developer\ ID\ Application:* ]]; then
+            echo "KAKU_SIGNING_IDENTITY must be a Developer ID Application certificate for tagged releases" >&2
+            exit 1
+          fi
+
+      - name: Run release checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p kaku -p kaku-gui
+          cargo nextest run --locked -E 'not test(shapecache::test::ligatures_jetbrains)'
+          cargo nextest run --locked -p wezterm-escape-parser
+          bash assets/shell-integration/tests/normalize_kaku_source_line_smoke.sh
+          bash assets/shell-integration/tests/cleanup_legacy_inline_block_smoke.sh
+
       - name: Import signing certificate
         if: env.KAKU_SIGNING_IDENTITY != ''
-        env:
-          KAKU_SIGNING_IDENTITY: ${{ secrets.KAKU_SIGNING_IDENTITY }}
-          KAKU_CERTIFICATE_P12: ${{ secrets.KAKU_CERTIFICATE_P12 }}
-          KAKU_CERTIFICATE_PASSWORD: ${{ secrets.KAKU_CERTIFICATE_PASSWORD }}
         run: |
           echo "Setting up signing certificate..."
           # Create temporary keychain
@@ -50,30 +125,48 @@ jobs:
 
       - name: Build Kaku
         env:
-          KAKU_SIGNING_IDENTITY: ${{ secrets.KAKU_SIGNING_IDENTITY }}
+          KAKU_REQUIRE_SIGNED_RELEASE: ${{ steps.release_meta.outputs.require_release_prereqs }}
         run: |
           set -o pipefail
           PROFILE=release-opt BUILD_ARCH=universal ./scripts/build.sh 2>&1 | sed '/has no symbols/d'
 
+      - name: Verify release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lipo dist/Kaku.app/Contents/MacOS/kaku -verify_arch arm64 x86_64
+          lipo dist/Kaku.app/Contents/MacOS/kaku-gui -verify_arch arm64 x86_64
+
+          app_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/Kaku.app/Contents/Info.plist)
+          if [[ "$app_version" != "${{ steps.release_meta.outputs.version }}" ]]; then
+            echo "Bundled app version ($app_version) does not match release version (${{ steps.release_meta.outputs.version }})" >&2
+            exit 1
+          fi
+
+          test -f dist/Kaku.dmg
+          test -f dist/kaku_for_update.zip
+          test -f dist/kaku_for_update.zip.sha256
+
+          test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-autosuggestions/.kaku-vendor-ref)" = "85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5"
+          test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-syntax-highlighting/.kaku-vendor-ref)" = "1d85c692615a25fe2293bdd44b34c217d5d2bf04"
+          test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-completions/.kaku-vendor-ref)" = "84615f3d0b0e943d5b1de862c9552e572c8e70bb"
+          test "$(cat dist/Kaku.app/Contents/Resources/vendor/zsh-z/.kaku-vendor-ref)" = "cf9225feebfae55e557e103e95ce20eca5eff270"
+
       - name: Notarize Kaku
         if: env.KAKU_NOTARIZE_PASSWORD != ''
-        env:
-          KAKU_NOTARIZE_APPLE_ID: ${{ secrets.KAKU_NOTARIZE_APPLE_ID }}
-          KAKU_NOTARIZE_TEAM_ID: ${{ secrets.KAKU_NOTARIZE_TEAM_ID }}
-          KAKU_NOTARIZE_PASSWORD: ${{ secrets.KAKU_NOTARIZE_PASSWORD }}
         run: |
           echo "Notarizing Kaku..."
           ./scripts/notarize.sh
 
       - name: Verify Notarization
         if: env.KAKU_NOTARIZE_PASSWORD != ''
-        env:
-          KAKU_NOTARIZE_PASSWORD: ${{ secrets.KAKU_NOTARIZE_PASSWORD }}
         run: |
           echo "Verifying notarization status..."
           spctl -a -vv dist/Kaku.app
 
       - name: Upload to Release
+        if: github.ref_type == 'tag'
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1
         with:
           allowUpdates: true
@@ -87,20 +180,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#V}"
-            version="${version#v}"
-          else
-            version="$(grep '^version =' kaku/Cargo.toml | head -n 1 | cut -d '"' -f2)"
-          fi
-
           sha256="$(shasum -a 256 dist/Kaku.dmg | awk '{print $1}')"
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version=${{ steps.release_meta.outputs.version }}" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch tap bump
-        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        if: github.ref_type == 'tag'
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           token: ${{ env.HOMEBREW_TAP_TOKEN }}
