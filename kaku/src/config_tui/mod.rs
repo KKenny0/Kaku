@@ -11,9 +11,12 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn run() -> anyhow::Result<()> {
+const KAKU_AUTO_COLOR_SCHEME_EXPR: &str =
+    "(wezterm.gui and wezterm.gui.get_appearance() or 'Dark'):find('Dark') and 'Kaku Dark' or 'Kaku Light'";
+
+pub fn run(config_path: PathBuf) -> anyhow::Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
     stdout
@@ -22,7 +25,7 @@ pub fn run() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let mut app = App::new();
+    let mut app = App::new(config_path);
     app.load_config();
 
     let (result, should_signal) = run_app(&mut terminal, &mut app);
@@ -84,7 +87,8 @@ fn run_app(
                     }
                     disable_raw_mode().ok();
                     terminal.clear().ok();
-                    if let Err(e) = open_config_in_editor() {
+                    let config_path = app.config_path();
+                    if let Err(e) = open_config_in_editor(&config_path) {
                         return (Err(e), app.has_saved);
                     }
                     return (Ok(()), app.has_saved);
@@ -145,6 +149,14 @@ fn run_app(
     }
 }
 
+pub(crate) fn ensure_editable_config_exists(config_path: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = config_path {
+        return config::ensure_config_exists_at_path(path);
+    }
+
+    config::ensure_user_config_exists()
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Normal,
@@ -154,6 +166,7 @@ enum Mode {
 
 #[derive(Clone)]
 struct ConfigField {
+    section: &'static str,
     key: &'static str,
     lua_key: &'static str,
     value: String,
@@ -171,6 +184,7 @@ impl ConfigField {
 }
 
 struct App {
+    config_path: PathBuf,
     fields: Vec<ConfigField>,
     selected: usize,
     mode: Mode,
@@ -185,18 +199,20 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(config_path: PathBuf) -> Self {
         let fields = vec![
             // Appearance
             ConfigField {
+                section: "Appearance",
                 key: "Theme",
                 lua_key: "color_scheme",
                 value: String::new(),
                 default: "Kaku Dark".into(),
-                options: vec!["Kaku Dark", "Kaku Light"],
+                options: vec!["Kaku Dark", "Kaku Light", "Auto"],
                 skip_write: false,
             },
             ConfigField {
+                section: "Appearance",
                 key: "Font",
                 lua_key: "font",
                 value: String::new(),
@@ -205,6 +221,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Appearance",
                 key: "Font Size",
                 lua_key: "font_size",
                 value: String::new(),
@@ -213,6 +230,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Appearance",
                 key: "Line Height",
                 lua_key: "line_height",
                 value: String::new(),
@@ -221,6 +239,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Integrations",
                 key: "Global Hotkey",
                 lua_key: "macos_global_hotkey",
                 value: String::new(),
@@ -229,6 +248,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Integrations",
                 key: "Kaku Assistant",
                 lua_key: "__assistant_enabled__",
                 value: String::new(),
@@ -237,6 +257,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Window",
                 key: "Tab Bar Position",
                 lua_key: "tab_bar_at_bottom",
                 value: String::new(),
@@ -245,14 +266,16 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
-                key: "Copy on Select",
-                lua_key: "copy_on_select",
+                section: "Window",
+                key: "Scrollbar",
+                lua_key: "enable_scroll_bar",
                 value: String::new(),
-                default: "On".into(),
+                default: "Off".into(),
                 options: vec!["On", "Off"],
                 skip_write: false,
             },
             ConfigField {
+                section: "Window",
                 key: "Shadow",
                 lua_key: "window_decorations",
                 value: String::new(),
@@ -261,6 +284,34 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Behavior",
+                key: "Copy on Select",
+                lua_key: "copy_on_select",
+                value: String::new(),
+                default: "On".into(),
+                options: vec!["On", "Off"],
+                skip_write: false,
+            },
+            ConfigField {
+                section: "Behavior",
+                key: "Confirm Tab Close",
+                lua_key: "tab_close_confirmation",
+                value: String::new(),
+                default: "Off".into(),
+                options: vec!["On", "Off"],
+                skip_write: false,
+            },
+            ConfigField {
+                section: "Behavior",
+                key: "Confirm Pane Close",
+                lua_key: "pane_close_confirmation",
+                value: String::new(),
+                default: "Off".into(),
+                options: vec!["On", "Off"],
+                skip_write: false,
+            },
+            ConfigField {
+                section: "Behavior",
                 key: "Bell Tab Indicator",
                 lua_key: "bell_tab_indicator",
                 value: String::new(),
@@ -269,6 +320,7 @@ impl App {
                 skip_write: false,
             },
             ConfigField {
+                section: "Behavior",
                 key: "Bell Dock Badge",
                 lua_key: "bell_dock_badge",
                 value: String::new(),
@@ -279,6 +331,7 @@ impl App {
         ];
 
         Self {
+            config_path,
             fields,
             selected: 0,
             mode: Mode::Normal,
@@ -352,7 +405,7 @@ impl App {
     }
 
     fn config_path(&self) -> PathBuf {
-        config::user_config_path()
+        self.config_path.clone()
     }
 
     fn extract_lua_value(content: &str, key: &str) -> Option<String> {
@@ -395,11 +448,21 @@ impl App {
                     return Some(value_part[1..1 + end].to_string());
                 }
             }
-            // Number, boolean, or identifier
             let value = Self::strip_trailing_comment(value_part);
-            return Some(value);
+            if key == "color_scheme" && Self::is_kaku_auto_color_scheme_expr(&value) {
+                return Some("Auto".to_string());
+            }
+            // Number, boolean, or identifier
+            if Self::is_scalar_literal(&value) {
+                return Some(value);
+            }
+            return None;
         }
         None
+    }
+
+    fn is_kaku_auto_color_scheme_expr(raw: &str) -> bool {
+        raw.trim() == KAKU_AUTO_COLOR_SCHEME_EXPR
     }
 
     fn extract_quoted_arg(s: &str, prefix: &str) -> Option<String> {
@@ -505,7 +568,31 @@ impl App {
     /// format; the caller should set skip_write=true to protect the original line.
     fn normalize_value(lua_key: &str, raw: &str) -> Option<String> {
         match lua_key {
-            "copy_on_select" | "bell_tab_indicator" | "bell_dock_badge" => {
+            "color_scheme" | "font" => {
+                if raw.is_empty()
+                    || raw.eq_ignore_ascii_case("nil")
+                    || raw.eq_ignore_ascii_case("true")
+                    || raw.eq_ignore_ascii_case("false")
+                    || Self::is_number_literal(raw)
+                {
+                    None
+                } else {
+                    Some(raw.to_string())
+                }
+            }
+            "font_size" | "line_height" => {
+                if Self::is_number_literal(raw) {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            }
+            "copy_on_select"
+            | "enable_scroll_bar"
+            | "tab_close_confirmation"
+            | "pane_close_confirmation"
+            | "bell_tab_indicator"
+            | "bell_dock_badge" => {
                 if raw == "true" {
                     Some("On".into())
                 } else if raw == "false" {
@@ -565,8 +652,21 @@ impl App {
                     None
                 }
             }
-            _ => Some(raw.to_string()),
+            _ => None,
         }
+    }
+
+    fn is_number_literal(raw: &str) -> bool {
+        let value = raw.trim();
+        !value.is_empty() && (value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok())
+    }
+
+    fn is_scalar_literal(raw: &str) -> bool {
+        let value = raw.trim();
+        value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("nil")
+            || Self::is_number_literal(value)
     }
 
     fn display_value<'a>(&'a self, field: &'a ConfigField) -> &'a str {
@@ -742,7 +842,7 @@ impl App {
 
     fn save_config(&self) -> anyhow::Result<()> {
         // Ensure config file exists with proper structure first
-        config::ensure_user_config_exists()?;
+        ensure_editable_config_exists(Some(&self.config_path))?;
 
         let config_path = self.config_path();
         let original_content = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -952,12 +1052,23 @@ impl App {
 
     fn to_lua_value(&self, field: &ConfigField) -> String {
         match field.lua_key {
-            "color_scheme" => format!("'{}'", field.value),
+            "color_scheme" => {
+                if field.value == "Auto" {
+                    KAKU_AUTO_COLOR_SCHEME_EXPR.into()
+                } else {
+                    format!("'{}'", field.value)
+                }
+            }
             "font" => format!("wezterm.font('{}')", field.value),
             "font_size" | "line_height" | "window_background_opacity" | "split_pane_gap" => {
                 field.value.clone()
             }
-            "copy_on_select" | "bell_tab_indicator" | "bell_dock_badge" => {
+            "copy_on_select"
+            | "enable_scroll_bar"
+            | "tab_close_confirmation"
+            | "pane_close_confirmation"
+            | "bell_tab_indicator"
+            | "bell_dock_badge" => {
                 if field.value == "On" {
                     "true".into()
                 } else {
@@ -1030,8 +1141,7 @@ impl App {
     }
 }
 
-fn open_config_in_editor() -> anyhow::Result<()> {
-    let config_path = config::user_config_path();
+fn open_config_in_editor(config_path: &Path) -> anyhow::Result<()> {
     open_path_in_editor(&config_path)
 }
 
@@ -1053,11 +1163,17 @@ fn signal_config_changed() {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::{ensure_editable_config_exists, App, KAKU_AUTO_COLOR_SCHEME_EXPR};
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn test_app() -> App {
+        App::new(PathBuf::from("/tmp/kaku-config-tui-test.lua"))
+    }
 
     #[test]
     fn tab_bar_at_bottom_uses_default_when_value_is_empty() {
-        let app = App::new();
+        let app = test_app();
         let field = app
             .fields
             .iter()
@@ -1069,7 +1185,7 @@ mod tests {
 
     #[test]
     fn tab_bar_at_bottom_respects_explicit_top_selection() {
-        let mut app = App::new();
+        let mut app = test_app();
         let idx = app
             .fields
             .iter()
@@ -1081,8 +1197,124 @@ mod tests {
     }
 
     #[test]
+    fn color_scheme_defaults_to_dark() {
+        let app = test_app();
+        let field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "color_scheme")
+            .expect("color_scheme field to exist");
+
+        assert_eq!(field.default, "Kaku Dark");
+    }
+
+    #[test]
+    fn color_scheme_auto_serializes_to_dynamic_expression() {
+        let mut app = test_app();
+        let idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "color_scheme")
+            .expect("color_scheme field to exist");
+        app.fields[idx].value = "Auto".to_string();
+
+        assert_eq!(
+            app.to_lua_value(&app.fields[idx]),
+            KAKU_AUTO_COLOR_SCHEME_EXPR
+        );
+    }
+
+    #[test]
+    fn load_config_round_trips_serialized_auto_theme_expression() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("kaku.lua");
+        std::fs::write(
+            &config_path,
+            format!("config.color_scheme = {KAKU_AUTO_COLOR_SCHEME_EXPR}\n"),
+        )
+        .expect("write config");
+
+        let mut app = App::new(config_path);
+        app.load_config();
+
+        let field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "color_scheme")
+            .expect("color_scheme field to exist");
+
+        assert_eq!(field.value, "Auto");
+        assert!(!field.skip_write);
+    }
+
+    #[test]
+    fn scrollbar_field_defaults_to_off() {
+        let app = test_app();
+        let field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "enable_scroll_bar")
+            .expect("enable_scroll_bar field to exist");
+
+        assert_eq!(field.default, "Off");
+        assert_eq!(app.to_lua_value(field), "false");
+    }
+
+    #[test]
+    fn normalize_scrollbar_bool_values() {
+        assert_eq!(
+            App::normalize_value("enable_scroll_bar", "true"),
+            Some("On".into())
+        );
+        assert_eq!(
+            App::normalize_value("enable_scroll_bar", "false"),
+            Some("Off".into())
+        );
+    }
+
+    #[test]
+    fn close_confirmation_fields_default_to_off() {
+        let app = test_app();
+        let tab_field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "tab_close_confirmation")
+            .expect("tab_close_confirmation field to exist");
+        let pane_field = app
+            .fields
+            .iter()
+            .find(|f| f.lua_key == "pane_close_confirmation")
+            .expect("pane_close_confirmation field to exist");
+
+        assert_eq!(tab_field.default, "Off");
+        assert_eq!(pane_field.default, "Off");
+        assert_eq!(app.to_lua_value(tab_field), "false");
+        assert_eq!(app.to_lua_value(pane_field), "false");
+    }
+
+    #[test]
+    fn normalize_close_confirmation_bool_values() {
+        assert_eq!(
+            App::normalize_value("tab_close_confirmation", "true"),
+            Some("On".into())
+        );
+        assert_eq!(
+            App::normalize_value("tab_close_confirmation", "false"),
+            Some("Off".into())
+        );
+        assert_eq!(
+            App::normalize_value("pane_close_confirmation", "true"),
+            Some("On".into())
+        );
+        assert_eq!(
+            App::normalize_value("pane_close_confirmation", "false"),
+            Some("Off".into())
+        );
+    }
+
+    #[test]
     fn finalize_active_input_commits_edit_buffer() {
-        let mut app = App::new();
+        let mut app = test_app();
         let idx = app
             .fields
             .iter()
@@ -1096,5 +1328,44 @@ mod tests {
 
         assert_eq!(app.fields[idx].value, "JetBrains MonoX");
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn dynamic_color_scheme_expression_is_not_parsed_as_writable_value() {
+        let content =
+            "config.color_scheme = appearance == 'Dark' and 'Kaku Dark' or 'Kaku Light'\n";
+
+        assert_eq!(App::extract_lua_value(content, "color_scheme"), None);
+        assert!(App::has_config_line(content, "color_scheme"));
+    }
+
+    #[test]
+    fn color_scheme_rejects_nil_literal() {
+        assert_eq!(App::normalize_value("color_scheme", "nil"), None);
+    }
+
+    #[test]
+    fn scientific_notation_numbers_are_supported() {
+        assert_eq!(
+            App::normalize_value("font_size", "1.0e2"),
+            Some("1.0e2".into())
+        );
+        assert_eq!(
+            App::extract_lua_value("config.font_size = 1.0e2\n", "font_size"),
+            Some("1.0e2".into())
+        );
+    }
+
+    #[test]
+    fn ensure_editable_config_creates_missing_custom_path() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("nested").join("custom-kaku.lua");
+
+        let ensured = ensure_editable_config_exists(Some(&config_path)).expect("ensure config");
+
+        assert_eq!(ensured, config_path);
+        assert!(config_path.is_file());
+        let content = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(content.contains("local wezterm = require 'wezterm'"));
     }
 }
