@@ -705,6 +705,8 @@ pub struct TermWindow {
     current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
     last_scroll_info: RenderableDimensions,
+    scrollbar_hovering: bool,
+    scrollbar_visible_until: Option<Instant>,
     line_editor_selection: LineEditorSelectionState,
     line_editor_selection_owner: Option<PaneId>,
 
@@ -1039,6 +1041,7 @@ impl TermWindow {
             show_tab_bar,
             config.tab_bar_at_bottom,
             tab_bar_height,
+            false,
         );
 
         let mut dimensions = Dimensions {
@@ -1053,8 +1056,11 @@ impl TermWindow {
         let mut border = Self::get_os_border_impl(&None, &config, &dimensions, &render_metrics);
 
         // Mirror get_os_border() for non-fullscreen startup windows.
-        let integrated_top_inset =
-            crate::termwindow::render::borders::integrated_buttons_top_inset(&config, false);
+        let integrated_top_inset = crate::termwindow::render::borders::integrated_buttons_top_inset(
+            &config,
+            false,
+            show_tab_bar && !config.tab_bar_at_bottom,
+        );
         if integrated_top_inset > 0 {
             border.top += ULength::new(integrated_top_inset);
         }
@@ -1131,6 +1137,8 @@ impl TermWindow {
             current_modifier_and_leds: Default::default(),
             prev_cursor: PrevCursorPos::new(),
             last_scroll_info: RenderableDimensions::default(),
+            scrollbar_hovering: false,
+            scrollbar_visible_until: None,
             line_editor_selection: LineEditorSelectionState::None,
             line_editor_selection_owner: None,
             tab_state: RefCell::new(HashMap::new()),
@@ -2212,6 +2220,7 @@ impl TermWindow {
             self.show_tab_bar,
             self.config.tab_bar_at_bottom,
             tab_bar_height,
+            self.window_state.contains(WindowState::FULL_SCREEN),
         )
     }
 
@@ -2321,6 +2330,9 @@ impl TermWindow {
         );
 
         self.show_scroll_bar = config.enable_scroll_bar;
+        self.last_scroll_info = RenderableDimensions::default();
+        self.scrollbar_hovering = false;
+        self.scrollbar_visible_until = None;
         self.shape_generation += 1;
         {
             let mut shape_cache = self.shape_cache.borrow_mut();
@@ -2377,6 +2389,7 @@ impl TermWindow {
             self.load_os_parameters();
             self.apply_scale_change(&dimensions, self.fonts.get_font_scale());
             self.apply_dimensions(&dimensions, None, &window);
+            self.update_scrollbar();
             // Rebuild tab bar state synchronously so tab bar colors match the
             // new palette in the same invalidate cycle as pane colors.
             self.update_title_impl();
@@ -2447,6 +2460,155 @@ impl TermWindow {
 
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
+        }
+    }
+
+    fn scrollbar_track_for_pane(&self, pane: &Arc<dyn Pane>) -> Option<ScrollbarTrack> {
+        if !self.show_scroll_bar {
+            return None;
+        }
+
+        let dims = pane.get_dimensions();
+        if dims.scrollback_rows <= dims.viewport_rows {
+            return None;
+        }
+
+        let tab_bar_height = if self.show_tab_bar {
+            self.tab_bar_pixel_height().unwrap_or(0.)
+        } else {
+            0.
+        };
+        let (top_bar_height, bottom_bar_height) = if self.config.tab_bar_at_bottom {
+            (0.0, tab_bar_height)
+        } else {
+            (tab_bar_height, 0.0)
+        };
+        let border = self.get_os_border();
+
+        Some(scrollbar_track(
+            self.dimensions.pixel_width,
+            self.dimensions.pixel_height,
+            (top_bar_height as usize).saturating_add(border.top.get()),
+            border.bottom.get() + bottom_bar_height as usize,
+            self.render_metrics.cell_size.height as usize,
+            self.effective_right_padding(&self.config),
+            border.right.get(),
+        ))
+    }
+
+    fn update_scrollbar_hovering(&mut self, pane: &Arc<dyn Pane>, context: &dyn WindowOps) {
+        let hovering = self.current_mouse_event.as_ref().is_some_and(|event| {
+            matches!(self.current_mouse_capture, None | Some(MouseCapture::UI))
+                && self.scrollbar_track_for_pane(pane).is_some_and(|track| {
+                    scrollbar_hover_hit(
+                        track.x,
+                        track.top,
+                        track.width,
+                        track.height,
+                        event.coords.x,
+                        event.coords.y,
+                    )
+                })
+        });
+
+        if hovering != self.scrollbar_hovering {
+            self.scrollbar_hovering = hovering;
+            context.invalidate();
+        }
+    }
+
+    fn reveal_scrollbar(&mut self) {
+        self.scrollbar_visible_until = Some(Instant::now() + Duration::from_millis(900));
+        if let Some(window) = self.window.as_ref() {
+            window.invalidate();
+        }
+    }
+
+    fn scrollbar_is_dragging(&self) -> bool {
+        matches!(
+            self.dragging,
+            Some((
+                UIItem {
+                    item_type: UIItemType::AboveScrollThumb
+                        | UIItemType::ScrollThumb
+                        | UIItemType::BelowScrollThumb,
+                    ..
+                },
+                _
+            ))
+        )
+    }
+
+    fn scrollbar_thumb_alpha(
+        &self,
+        pane: &Arc<dyn Pane>,
+        track_x: usize,
+        track_top: usize,
+        track_width: usize,
+        track_height: usize,
+    ) -> Option<f32> {
+        if !self.show_scroll_bar {
+            return None;
+        }
+
+        let dims = pane.get_dimensions();
+        if dims.scrollback_rows <= dims.viewport_rows {
+            return None;
+        }
+
+        let is_scrolled = self.get_viewport(pane.pane_id()).is_some();
+        let is_dragging = self.scrollbar_is_dragging();
+        let is_hovering = matches!(
+            &self.current_mouse_event,
+            Some(event)
+                if scrollbar_hover_hit(
+                    track_x,
+                    track_top,
+                    track_width,
+                    track_height,
+                    event.coords.x,
+                    event.coords.y,
+                ) && matches!(self.current_mouse_capture, None | Some(MouseCapture::UI))
+        );
+        let is_light = is_light_color(&pane.palette().background);
+        let mut alpha: f32 = if is_scrolled {
+            if is_light {
+                0.62
+            } else {
+                0.54
+            }
+        } else {
+            0.0
+        };
+
+        if is_hovering {
+            alpha = alpha.max(if is_light { 0.78 } else { 0.70 });
+        }
+        if is_dragging {
+            alpha = alpha.max(if is_light { 0.88 } else { 0.80 });
+        }
+
+        let now = Instant::now();
+        if let Some(deadline) = self
+            .scrollbar_visible_until
+            .filter(|deadline| *deadline > now)
+        {
+            let progress = (deadline - now).as_secs_f32() / 0.9;
+            alpha = alpha.max(if is_light { 0.34 } else { 0.30 } * progress.max(0.0));
+            if !is_scrolled && !is_hovering && !is_dragging {
+                let next = now + Duration::from_millis(16);
+                let mut anim = self.has_animation.borrow_mut();
+                match *anim {
+                    Some(existing) if existing <= next => {}
+                    _ => *anim = Some(next),
+                }
+            }
+        }
+
+        if alpha > 0.0 {
+            Some(alpha)
+        } else {
+            None
         }
     }
 
@@ -3164,6 +3326,7 @@ impl TermWindow {
             .unwrap_or(dims.physical_top)
             .saturating_add(amount);
 
+        self.reveal_scrollbar();
         self.set_viewport(pane.pane_id(), Some(position), dims);
 
         // Scroll to bottom → exit peek, return to alt screen
@@ -4033,7 +4196,9 @@ impl TermWindow {
         };
 
         let pane_id = pane.pane_id();
-        if confirm && !pane.can_close_without_prompting(CloseReason::Pane) {
+        let should_confirm = self.config.pane_close_confirmation
+            || (confirm && !pane.can_close_without_prompting(CloseReason::Pane));
+        if should_confirm {
             let window = self.window.clone().unwrap();
             let (overlay, future) = start_overlay_pane(self, &pane, move |pane_id, term| {
                 confirm_close_pane(pane_id, term, mux_window_id, window)
@@ -4060,7 +4225,9 @@ impl TermWindow {
         drop(mux_window);
 
         let tab_id = tab.tab_id();
-        if confirm && !tab.can_close_without_prompting(CloseReason::Tab) {
+        let should_confirm = self.config.tab_close_confirmation
+            || (confirm && !tab.can_close_without_prompting(CloseReason::Tab));
+        if should_confirm {
             if self.activate_tab(tab_idx as isize).is_err() {
                 return;
             }
@@ -4085,7 +4252,9 @@ impl TermWindow {
         let tab_id = tab.tab_id();
         let mux_window_id = self.mux_window_id;
 
-        if confirm && !tab.can_close_without_prompting(CloseReason::Tab) {
+        let should_confirm = self.config.tab_close_confirmation
+            || (confirm && !tab.can_close_without_prompting(CloseReason::Tab));
+        if should_confirm {
             // Tab has running processes; ask the user first.
             // We do not record the cwd here: the user may cancel, and we cannot
             // reliably hook the async confirmation result from this call site.
@@ -4217,10 +4386,12 @@ impl TermWindow {
             pane.set_primary_peek(false);
         }
         let dims = pane.get_dimensions();
+        self.reveal_scrollbar();
         self.set_viewport(pane.pane_id(), Some(dims.scrollback_top), dims);
     }
 
     fn scroll_to_bottom(&mut self, pane: &Arc<dyn Pane>) {
+        self.reveal_scrollbar();
         self.pane_state(pane.pane_id()).viewport = None;
         pane.set_primary_peek(false);
     }
