@@ -1364,6 +1364,8 @@ normalize_kaku_path_line() {
 	tmp_file="$(mktemp "${TMPDIR:-/tmp}/kaku-zshrc.XXXXXX")"
 
 	# Exit codes: 0 = replaced exactly 1 line, 2 = collapsed duplicates, 3 = no match.
+	# Only normalize Kaku's single-line PATH guard variants; leave user-managed
+	# multi-line or custom PATH logic untouched.
 	if awk -v path_line="$PATH_LINE" '
 BEGIN { replaced = 0; extra = 0 }
 {
@@ -1372,7 +1374,9 @@ BEGIN { replaced = 0; extra = 0 }
 		next
 	}
 
-	if ($0 ~ /kaku\/zsh\/bin/ && $0 ~ /export[[:space:]]+PATH=/) {
+	if ($0 ~ /^[[:space:]]*\[\[/ &&
+	    $0 ~ /kaku\/zsh\/bin/ &&
+	    $0 ~ /&&[[:space:]]*export[[:space:]]+PATH=/) {
 		if (!replaced) {
 			print path_line
 			replaced = 1

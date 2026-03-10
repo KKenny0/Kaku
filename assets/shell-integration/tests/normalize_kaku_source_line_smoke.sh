@@ -17,7 +17,9 @@ BEGIN { replaced = 0; extra = 0 }
     next
   }
 
-  if ($0 ~ /kaku\/zsh\/bin/ && $0 ~ /export[[:space:]]+PATH=/) {
+  if ($0 ~ /^[[:space:]]*\[\[/ &&
+      $0 ~ /kaku\/zsh\/bin/ &&
+      $0 ~ /&&[[:space:]]*export[[:space:]]+PATH=/) {
     if (!replaced) {
       print path_line
       replaced = 1
@@ -133,6 +135,13 @@ run_normalize \
   2 \
   $'# [[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"\n'"$PATH_LINE"$'\n' \
   "duplicate path lines collapse"
+
+run_normalize \
+  normalize_kaku_path_line_file \
+  $'if [[ -d "$HOME/.config/kaku/zsh/bin" ]]; then\n  export PATH="$PATH:$HOME/.config/kaku/zsh/bin"\nfi\n' \
+  3 \
+  $'if [[ -d "$HOME/.config/kaku/zsh/bin" ]]; then\n  export PATH="$PATH:$HOME/.config/kaku/zsh/bin"\nfi\n' \
+  "custom path logic is preserved"
 
 run_normalize \
   normalize_kaku_source_line_file \
