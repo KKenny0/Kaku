@@ -243,6 +243,8 @@ impl CommandDef {
             ActivateTabRelative(-1),
             ActivateTabRelative(1),
             ActivateLastTab,
+            ToggleCurrentTabPanesInputBroadcast,
+            ToggleAllPanesInputBroadcast,
             MoveTabRelative(-1),
             MoveTabRelative(1),
             TogglePaneZoomState,
@@ -745,6 +747,8 @@ impl CommandDef {
                     ActivateTabRelative(1) => 31,
                     ActivateLastTab => 32,
                     ShowTabNavigator => 33,
+                    ToggleCurrentTabPanesInputBroadcast => 34,
+                    ToggleAllPanesInputBroadcast => 35,
                     MoveTabRelative(-1) => 40,
                     MoveTabRelative(1) => 41,
                     PaneSelect(PaneSelectArguments {
@@ -2060,6 +2064,22 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Window"],
             icon: None,
         },
+        ToggleCurrentTabPanesInputBroadcast => CommandDef {
+            brief: "Toggle Current Tab Panes".into(),
+            doc: "Toggle broadcasting terminal keyboard input to every visible pane in the current tab.".into(),
+            keys: vec![(Modifiers::SUPER.union(Modifiers::ALT), "i".into())],
+            args: &[ArgType::ActiveWindow],
+            menubar: &["Window"],
+            icon: None,
+        },
+        ToggleAllPanesInputBroadcast => CommandDef {
+            brief: "Toggle All Panes (All Tabs)".into(),
+            doc: "Toggle broadcasting terminal keyboard input to every visible pane in every tab in the current window.".into(),
+            keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "i".into())],
+            args: &[ArgType::ActiveWindow],
+            menubar: &["Window"],
+            icon: None,
+        },
         ClearKeyTableStack => CommandDef {
             brief: "Clear the key table stack".into(),
             doc: "Removes all entries from the stack".into(),
@@ -2585,6 +2605,8 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         TogglePaneZoomState,
         ActivateLastTab,
         ShowTabNavigator,
+        ToggleCurrentTabPanesInputBroadcast,
+        ToggleAllPanesInputBroadcast,
         // ----------------- Help
         OpenUri("https://github.com/tw93/Kaku".to_string()),
         OpenUri("https://github.com/tw93/Kaku/issues/".to_string()),
@@ -2600,4 +2622,53 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
     );
 
     actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_command_from_key_assignment, CommandDef};
+    use config::keyassignment::KeyAssignment;
+    use config::ConfigHandle;
+    use window::Modifiers;
+
+    #[test]
+    fn toggle_current_tab_panes_input_broadcast_has_default_shortcut() {
+        let cmd =
+            derive_command_from_key_assignment(&KeyAssignment::ToggleCurrentTabPanesInputBroadcast)
+                .expect("command");
+
+        assert_eq!(
+            cmd.keys,
+            vec![(Modifiers::SUPER.union(Modifiers::ALT), "i".into())]
+        );
+    }
+
+    #[test]
+    fn toggle_all_panes_input_broadcast_has_default_shortcut() {
+        let cmd = derive_command_from_key_assignment(&KeyAssignment::ToggleAllPanesInputBroadcast)
+            .expect("command");
+
+        assert_eq!(
+            cmd.keys,
+            vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "i".into())]
+        );
+    }
+
+    #[test]
+    fn toggle_current_tab_panes_input_broadcast_is_in_default_assignments() {
+        let config = ConfigHandle::default_config();
+
+        assert!(CommandDef::default_key_assignments(&config)
+            .iter()
+            .any(|(_, _, action)| *action == KeyAssignment::ToggleCurrentTabPanesInputBroadcast));
+    }
+
+    #[test]
+    fn toggle_all_panes_input_broadcast_is_in_default_assignments() {
+        let config = ConfigHandle::default_config();
+
+        assert!(CommandDef::default_key_assignments(&config)
+            .iter()
+            .any(|(_, _, action)| *action == KeyAssignment::ToggleAllPanesInputBroadcast));
+    }
 }

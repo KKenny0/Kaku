@@ -673,6 +673,8 @@ pub enum KeyAssignment {
     ResetFontAndWindowSize,
     ActivateTab(isize),
     ActivateLastTab,
+    ToggleCurrentTabPanesInputBroadcast,
+    ToggleAllPanesInputBroadcast,
     SendString(String),
     SendKey(KeyNoAction),
     Nop,

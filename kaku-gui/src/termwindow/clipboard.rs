@@ -2,7 +2,6 @@ use crate::termwindow::TermWindowNotif;
 use crate::TermWindow;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
-use mux::Mux;
 use smol::Timer;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -152,10 +151,11 @@ impl TermWindow {
     }
 
     pub fn paste_from_clipboard(&mut self, pane: &Arc<dyn Pane>, clipboard: ClipboardPasteSource) {
-        let pane_id = pane.pane_id();
+        let targets = self.terminal_input_targets(pane);
+        let pane_ids: Vec<_> = targets.iter().map(|pane| pane.pane_id()).collect();
         log::trace!(
-            "paste_from_clipboard in pane {} {:?}",
-            pane.pane_id(),
+            "paste_from_clipboard in panes {:?} {:?}",
+            pane_ids,
             clipboard
         );
         let window = self.window.as_ref().unwrap().clone();
@@ -168,32 +168,24 @@ impl TermWindow {
         promise::spawn::spawn(async move {
             match future.await {
                 Ok(data) => {
-                    window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
+                    window.notify(TermWindowNotif::Apply(Box::new(move |_myself| {
                         let clip = match data_to_paste_string(data, quote_dropped_files) {
                             Some(clip) => clip,
                             None => return,
                         };
 
-                        if let Some(pane) = myself
-                            .pane_state(pane_id)
-                            .overlay
-                            .as_ref()
-                            .map(|overlay| overlay.pane.clone())
-                            .or_else(|| {
-                                let mux = Mux::get();
-                                mux.get_pane(pane_id)
-                            })
-                        {
+                        for pane in &targets {
                             if let Err(err) = pane.send_paste(&clip) {
                                 log::warn!(
-                                    "failed to paste clipboard content into pane {pane_id}: {err:#}"
+                                    "failed to paste clipboard content into pane {}: {err:#}",
+                                    pane.pane_id()
                                 );
                             }
                         }
                     })));
                 }
                 Err(err) => {
-                    log::warn!("failed to read clipboard for pane {pane_id}: {err:#}");
+                    log::warn!("failed to read clipboard for panes {:?}: {err:#}", pane_ids);
                 }
             }
         })

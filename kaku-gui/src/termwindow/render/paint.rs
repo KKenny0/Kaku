@@ -24,6 +24,49 @@ pub enum AllowImage {
 }
 
 const STATUS_DOT_SIZE: f32 = 12.0;
+const BROADCAST_ICON_SIZE: f32 = 24.0;
+
+static ACTIVE_PANE_INDICATOR_POLY: &[Poly] = &[Poly {
+    path: &[PolyCommand::Circle {
+        center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+        radius: BlockCoord::Frac(1, 2),
+    }],
+    intensity: BlockAlpha::Full,
+    style: PolyStyle::Fill,
+}];
+
+static BROADCAST_INDICATOR_POLY: &[Poly] = &[
+    Poly {
+        path: &[PolyCommand::Circle {
+            center: (BlockCoord::Frac(1, 4), BlockCoord::Frac(1, 2)),
+            radius: BlockCoord::Frac(1, 8),
+        }],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Fill,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(5, 12), BlockCoord::Frac(4, 12)),
+            PolyCommand::QuadTo {
+                control: (BlockCoord::Frac(8, 12), BlockCoord::Frac(1, 2)),
+                to: (BlockCoord::Frac(5, 12), BlockCoord::Frac(8, 12)),
+            },
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(7, 12), BlockCoord::Frac(2, 12)),
+            PolyCommand::QuadTo {
+                control: (BlockCoord::Frac(11, 12), BlockCoord::Frac(1, 2)),
+                to: (BlockCoord::Frac(7, 12), BlockCoord::Frac(10, 12)),
+            },
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+];
 
 fn toast_colors_for_palette(
     palette: &wezterm_term::color::ColorPalette,
@@ -413,10 +456,13 @@ impl crate::TermWindow {
         }
 
         let num_panes = panes.len();
-        let mut active_pane_top_right: Option<(f32, f32, bool)> = None;
+        let broadcast_visual_mode = self.broadcast_input_visual_mode();
+        let mut input_target_top_right: Vec<(f32, f32, bool)> = vec![];
 
         for pos in panes {
-            if pos.is_active && num_panes > 1 {
+            let show_input_target_indicator =
+                broadcast_visual_mode || (num_panes > 1 && pos.is_active);
+            if show_input_target_indicator {
                 let cell_width = self.render_metrics.cell_size.width as f32;
                 let cell_height = self.render_metrics.cell_size.height as f32;
                 let (_, padding_top) = self.padding_left_top();
@@ -436,7 +482,7 @@ impl crate::TermWindow {
                 let x = self.content_left_inset() + ((pos.left + pos.width) as f32 * cell_width);
                 let y = top_pixel_y + (pos.top as f32 * cell_height);
                 let is_top_pane = pos.top == 0;
-                active_pane_top_right = Some((x, y, is_top_pane));
+                input_target_top_right.push((x, y, is_top_pane));
             }
             if pos.is_active {
                 if self.get_modal().is_none() {
@@ -451,22 +497,13 @@ impl crate::TermWindow {
             self.paint_pane(&pos, &mut layers).context("paint_pane")?;
         }
 
-        static CIRCLE_POLY: &[Poly] = &[Poly {
-            path: &[PolyCommand::Circle {
-                center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-                radius: BlockCoord::Frac(1, 2),
-            }],
-            intensity: BlockAlpha::Full,
-            style: PolyStyle::Fill,
-        }];
-
         const RIGHT_INSET: f32 = 3.0;
         const TOP_PANE_MARGIN_WITH_TAB_BAR: f32 = 24.0;
         const TOP_PANE_MARGIN_NO_TAB_BAR: f32 = 14.0;
         const LOWER_PANE_MARGIN: f32 = 20.0;
 
-        // Draw dot indicator for the active pane when split
-        if let Some((dot_x, dot_y, is_top_pane)) = active_pane_top_right {
+        // Draw dot indicator for panes that currently receive input.
+        for (dot_x, dot_y, is_top_pane) in input_target_top_right {
             let top_pane_margin = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
                 TOP_PANE_MARGIN_WITH_TAB_BAR
             } else {
@@ -479,18 +516,28 @@ impl crate::TermWindow {
             };
 
             const DOT_ALPHA: f32 = 0.5;
-            let dot_color = self.palette().cursor_bg.to_linear().mul_alpha(DOT_ALPHA);
+            const BROADCAST_ICON_ALPHA: f32 = 0.9;
+            let (poly, size, alpha) = if broadcast_visual_mode {
+                (
+                    BROADCAST_INDICATOR_POLY,
+                    BROADCAST_ICON_SIZE,
+                    BROADCAST_ICON_ALPHA,
+                )
+            } else {
+                (ACTIVE_PANE_INDICATOR_POLY, STATUS_DOT_SIZE, DOT_ALPHA)
+            };
+            let dot_color = self.palette().cursor_bg.to_linear().mul_alpha(alpha);
 
             self.poly_quad(
                 &mut layers,
                 2,
-                euclid::point2(dot_x - STATUS_DOT_SIZE - RIGHT_INSET, dot_y + margin_top),
-                CIRCLE_POLY,
+                euclid::point2(dot_x - size - RIGHT_INSET, dot_y + margin_top),
+                poly,
                 1,
-                euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
+                euclid::size2(size, size),
                 dot_color,
             )
-            .context("active pane indicator")?;
+            .context("input target indicator")?;
         }
 
         if let Some(pane) = self.get_active_pane_or_overlay() {

@@ -90,6 +90,62 @@ mod selection;
 pub mod spawn;
 pub mod tab_rename;
 pub mod webgpu;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputBroadcastMode {
+    Off,
+    CurrentTab,
+    AllTabs,
+}
+
+impl InputBroadcastMode {
+    fn applies_to_active_tab(
+        self,
+        target_tab_id: Option<TabId>,
+        active_tab_id: Option<TabId>,
+    ) -> bool {
+        match self {
+            Self::Off => false,
+            Self::CurrentTab => target_tab_id.is_some() && target_tab_id == active_tab_id,
+            Self::AllTabs => true,
+        }
+    }
+
+    fn title_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::CurrentTab => Some("[Broadcast: Tab]"),
+            Self::AllTabs => Some("[Broadcast: All Tabs]"),
+        }
+    }
+
+    fn disabled_toast(self) -> &'static str {
+        match self {
+            Self::Off => "Broadcast input off",
+            Self::CurrentTab => "Current tab broadcast input off",
+            Self::AllTabs => "All tabs broadcast input off",
+        }
+    }
+
+    fn unavailable_toast(self) -> &'static str {
+        match self {
+            Self::Off => "Broadcast input needs at least 2 panes",
+            Self::CurrentTab => "Current tab broadcast input needs at least 2 panes",
+            Self::AllTabs => "All tabs broadcast input needs at least 2 panes",
+        }
+    }
+
+    fn enabled_toast(self, target_count: usize) -> String {
+        match self {
+            Self::Off => format!("Broadcast input on ({target_count} panes)"),
+            Self::CurrentTab => {
+                format!("Current tab broadcast input on ({target_count} panes)")
+            }
+            Self::AllTabs => format!("All tabs broadcast input on ({target_count} panes)"),
+        }
+    }
+}
+
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
 
@@ -712,6 +768,8 @@ pub struct TermWindow {
     scrollbar_visible_until: Option<Instant>,
     line_editor_selection: LineEditorSelectionState,
     line_editor_selection_owner: Option<PaneId>,
+    input_broadcast_mode: InputBroadcastMode,
+    input_broadcast_tab_id: Option<TabId>,
 
     tab_state: RefCell<HashMap<TabId, TabState>>,
     pane_state: RefCell<HashMap<PaneId, PaneState>>,
@@ -1285,6 +1343,8 @@ impl TermWindow {
             scrollbar_visible_until: None,
             line_editor_selection: LineEditorSelectionState::None,
             line_editor_selection_owner: None,
+            input_broadcast_mode: InputBroadcastMode::Off,
+            input_broadcast_tab_id: None,
             tab_state: RefCell::new(HashMap::new()),
             pane_state: RefCell::new(HashMap::new()),
             current_mouse_buttons: vec![],
@@ -2984,6 +3044,12 @@ impl TermWindow {
             }
         };
 
+        let title = match self.input_broadcast_title_prefix() {
+            Some(prefix) if title.is_empty() => prefix.to_string(),
+            Some(prefix) => format!("{prefix} {title}"),
+            None => title,
+        };
+
         if let Some(window) = self.window.as_ref().cloned() {
             window.set_title(&title);
 
@@ -3669,6 +3735,12 @@ impl TermWindow {
                 self.activate_tab_relative(*n, false)?;
             }
             ActivateLastTab => self.activate_last_tab()?,
+            ToggleCurrentTabPanesInputBroadcast => {
+                self.toggle_input_broadcast_mode(InputBroadcastMode::CurrentTab)
+            }
+            ToggleAllPanesInputBroadcast => {
+                self.toggle_input_broadcast_mode(InputBroadcastMode::AllTabs)
+            }
             DecreaseFontSize => self.decrease_font_size(),
             IncreaseFontSize => self.increase_font_size(),
             ResetFontSize => self.reset_font_size(),
@@ -3689,14 +3761,14 @@ impl TermWindow {
             ActivateWindowRelativeNoWrap(n) => {
                 self.activate_window_relative(*n, false)?;
             }
-            SendString(s) => pane.writer().write_all(s.as_bytes())?,
+            SendString(s) => self.write_terminal_input_bytes(pane, s.as_bytes())?,
             SendKey(key) => {
                 use keyevent::Key;
                 let mods = key.mods;
                 if let Key::Code(key) = self.win_key_code_to_termwiz_key_code(
                     &key.key.resolve(self.config.key_map_preference),
                 ) {
-                    pane.key_down(key, mods)?;
+                    self.send_terminal_input_key(pane, key, mods, true, None)?;
                 }
             }
             Hide => {
@@ -4683,6 +4755,292 @@ impl TermWindow {
         tab.get_active_pane()
     }
 
+    fn active_tab_id(&self) -> Option<TabId> {
+        let mux = Mux::get();
+        mux.get_active_tab_for_window(self.mux_window_id)
+            .map(|tab| tab.tab_id())
+    }
+
+    fn input_broadcast_target_tab_id(&self) -> Option<TabId> {
+        if self.input_broadcast_mode != InputBroadcastMode::CurrentTab {
+            return None;
+        }
+
+        let target_tab_id = self.input_broadcast_tab_id?;
+        let mux = Mux::get();
+        let _tab = mux.get_tab(target_tab_id)?;
+        (mux.window_containing_tab(target_tab_id) == Some(self.mux_window_id))
+            .then_some(target_tab_id)
+    }
+
+    fn input_broadcast_title_prefix(&self) -> Option<&'static str> {
+        if self.input_broadcast_target_count(self.input_broadcast_mode) >= 2
+            && self
+                .input_broadcast_mode
+                .applies_to_active_tab(self.input_broadcast_target_tab_id(), self.active_tab_id())
+        {
+            self.input_broadcast_mode.title_prefix()
+        } else {
+            None
+        }
+    }
+
+    fn input_broadcast_target_count_for_tab(&self, tab_id: TabId) -> usize {
+        let mux = Mux::get();
+        let Some(tab) = mux.get_tab(tab_id) else {
+            return 0;
+        };
+
+        let mut pane_ids = std::collections::HashSet::new();
+        for pos in tab.iter_panes() {
+            pane_ids.insert(pos.pane.pane_id());
+        }
+        pane_ids.len()
+    }
+
+    fn input_broadcast_target_count(&self, mode: InputBroadcastMode) -> usize {
+        let mux = Mux::get();
+        let mut pane_ids = std::collections::HashSet::new();
+
+        match mode {
+            InputBroadcastMode::Off => 0,
+            InputBroadcastMode::CurrentTab => {
+                let Some(tab_id) = self.input_broadcast_target_tab_id() else {
+                    return 0;
+                };
+                self.input_broadcast_target_count_for_tab(tab_id)
+            }
+            InputBroadcastMode::AllTabs => {
+                let Some(window) = mux.get_window(self.mux_window_id) else {
+                    return 0;
+                };
+
+                for tab in window.iter() {
+                    for pos in tab.iter_panes() {
+                        pane_ids.insert(pos.pane.pane_id());
+                    }
+                }
+                pane_ids.len()
+            }
+        }
+    }
+
+    fn broadcast_input_visual_mode(&self) -> bool {
+        if !self
+            .input_broadcast_mode
+            .applies_to_active_tab(self.input_broadcast_target_tab_id(), self.active_tab_id())
+            || self.input_broadcast_target_count(self.input_broadcast_mode) < 2
+        {
+            return false;
+        }
+
+        self.get_active_pane_or_overlay().map(|pane| pane.pane_id())
+            == self.get_active_pane_no_overlay().map(|pane| pane.pane_id())
+    }
+
+    fn terminal_input_targets(&self, pane: &Arc<dyn Pane>) -> Vec<Arc<dyn Pane>> {
+        if self.input_broadcast_mode == InputBroadcastMode::Off {
+            return vec![pane.clone()];
+        }
+
+        let active_pane_id = self.get_active_pane_no_overlay().map(|pane| pane.pane_id());
+        if active_pane_id != Some(pane.pane_id()) {
+            return vec![pane.clone()];
+        }
+
+        let mut result = vec![pane.clone()];
+
+        let mux = Mux::get();
+        match self.input_broadcast_mode {
+            InputBroadcastMode::Off => {}
+            InputBroadcastMode::CurrentTab => {
+                let Some(target_tab_id) = self.input_broadcast_target_tab_id() else {
+                    return vec![pane.clone()];
+                };
+                if self.active_tab_id() != Some(target_tab_id) {
+                    return vec![pane.clone()];
+                }
+                let Some(tab) = mux.get_tab(target_tab_id) else {
+                    return vec![pane.clone()];
+                };
+
+                for pos in tab.iter_panes() {
+                    let tab_pane = pos.pane;
+                    if result
+                        .iter()
+                        .any(|existing| existing.pane_id() == tab_pane.pane_id())
+                    {
+                        continue;
+                    }
+                    result.push(tab_pane);
+                }
+            }
+            InputBroadcastMode::AllTabs => {
+                let Some(window) = mux.get_window(self.mux_window_id) else {
+                    return vec![pane.clone()];
+                };
+
+                for tab in window.iter() {
+                    for pos in tab.iter_panes() {
+                        let tab_pane = pos.pane;
+                        if result
+                            .iter()
+                            .any(|existing| existing.pane_id() == tab_pane.pane_id())
+                        {
+                            continue;
+                        }
+                        result.push(tab_pane);
+                    }
+                }
+            }
+        }
+
+        if result.len() > 1 {
+            result
+        } else {
+            vec![pane.clone()]
+        }
+    }
+
+    fn for_each_terminal_input_target<F>(
+        &self,
+        pane: &Arc<dyn Pane>,
+        mut func: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(&Arc<dyn Pane>) -> anyhow::Result<()>,
+    {
+        let targets = self.terminal_input_targets(pane);
+        let mut primary_error = None;
+        let mut fallback_error = None;
+        let mut any_success = false;
+
+        for (idx, target) in targets.iter().enumerate() {
+            match func(target) {
+                Ok(()) => any_success = true,
+                Err(err) => {
+                    if idx == 0 {
+                        primary_error = Some(err);
+                    } else {
+                        log::warn!(
+                            "broadcast terminal input to pane {} failed: {err:#}",
+                            target.pane_id()
+                        );
+                        fallback_error.get_or_insert(err);
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = primary_error {
+            return Err(err);
+        }
+        if any_success {
+            return Ok(());
+        }
+        if let Some(err) = fallback_error {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn write_terminal_input_bytes(&self, pane: &Arc<dyn Pane>, bytes: &[u8]) -> anyhow::Result<()> {
+        self.for_each_terminal_input_target(pane, |target| {
+            target
+                .writer()
+                .write_all(bytes)
+                .context("sending terminal input bytes")
+        })
+    }
+
+    fn send_terminal_input_key(
+        &self,
+        pane: &Arc<dyn Pane>,
+        key: ::termwiz::input::KeyCode,
+        modifiers: Modifiers,
+        is_down: bool,
+        key_event: Option<&KeyEvent>,
+    ) -> anyhow::Result<()> {
+        self.for_each_terminal_input_target(pane, |target| {
+            if let Some(key_event) = key_event {
+                if let Some(encoded) = self.encode_win32_input(target, key_event) {
+                    return target
+                        .writer()
+                        .write_all(encoded.as_bytes())
+                        .context("sending win32-input-mode encoded data");
+                }
+                if let Some(encoded) = self.encode_kitty_input(target, key_event) {
+                    return target
+                        .writer()
+                        .write_all(encoded.as_bytes())
+                        .context("sending kitty encoded data");
+                }
+            }
+
+            if is_down {
+                target.key_down(key.clone(), modifiers)
+            } else {
+                target.key_up(key.clone(), modifiers)
+            }
+        })
+    }
+
+    fn toggle_input_broadcast_mode(&mut self, mode: InputBroadcastMode) {
+        match mode {
+            InputBroadcastMode::Off => {
+                self.input_broadcast_mode = InputBroadcastMode::Off;
+                self.input_broadcast_tab_id = None;
+                self.update_title();
+                self.show_toast(mode.disabled_toast().to_string());
+            }
+            InputBroadcastMode::CurrentTab => {
+                let target_tab_id = self.active_tab_id();
+                if self.input_broadcast_mode == InputBroadcastMode::CurrentTab
+                    && self.input_broadcast_tab_id == target_tab_id
+                {
+                    self.input_broadcast_mode = InputBroadcastMode::Off;
+                    self.input_broadcast_tab_id = None;
+                    self.update_title();
+                    self.show_toast(mode.disabled_toast().to_string());
+                    return;
+                }
+
+                let target_count = target_tab_id
+                    .map(|tab_id| self.input_broadcast_target_count_for_tab(tab_id))
+                    .unwrap_or(0);
+                if target_count < 2 {
+                    self.show_toast(mode.unavailable_toast().to_string());
+                    return;
+                }
+
+                self.input_broadcast_mode = InputBroadcastMode::CurrentTab;
+                self.input_broadcast_tab_id = target_tab_id;
+                self.update_title();
+                self.show_toast(mode.enabled_toast(target_count));
+            }
+            InputBroadcastMode::AllTabs => {
+                if self.input_broadcast_mode == InputBroadcastMode::AllTabs {
+                    self.input_broadcast_mode = InputBroadcastMode::Off;
+                    self.input_broadcast_tab_id = None;
+                    self.update_title();
+                    self.show_toast(mode.disabled_toast().to_string());
+                    return;
+                }
+
+                let target_count = self.input_broadcast_target_count(mode);
+                if target_count < 2 {
+                    self.show_toast(mode.unavailable_toast().to_string());
+                    return;
+                }
+
+                self.input_broadcast_mode = InputBroadcastMode::AllTabs;
+                self.input_broadcast_tab_id = None;
+                self.update_title();
+                self.show_toast(mode.enabled_toast(target_count));
+            }
+        }
+    }
+
     /// Returns a Pane that we can interact with; this will typically be
     /// the active tab for the window, but if the window has a tab-wide
     /// overlay (such as the launcher / tab navigator),
@@ -4927,7 +5285,8 @@ impl Drop for TermWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::TermWindow;
+    use super::{InputBroadcastMode, TermWindow};
+    use mux::tab::TabId;
 
     #[test]
     fn other_user_vars_never_trigger_reload() {
@@ -4965,5 +5324,17 @@ mod tests {
     fn parse_editor_command_rejects_empty_value() {
         let err = TermWindow::parse_editor_command("   ").unwrap_err();
         assert!(err.to_string().contains("editor command is empty"));
+    }
+
+    #[test]
+    fn current_tab_broadcast_only_applies_to_bound_tab() {
+        let tab_a = TabId::from(1usize);
+        let tab_b = TabId::from(2usize);
+
+        assert!(InputBroadcastMode::CurrentTab.applies_to_active_tab(Some(tab_a), Some(tab_a)));
+        assert!(!InputBroadcastMode::CurrentTab.applies_to_active_tab(Some(tab_a), Some(tab_b)));
+        assert!(!InputBroadcastMode::CurrentTab.applies_to_active_tab(None, Some(tab_a)));
+        assert!(InputBroadcastMode::AllTabs.applies_to_active_tab(Some(tab_a), Some(tab_b)));
+        assert!(!InputBroadcastMode::Off.applies_to_active_tab(Some(tab_a), Some(tab_a)));
     }
 }
