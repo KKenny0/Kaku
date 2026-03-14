@@ -1,8 +1,8 @@
-# V0.7.0 Flow 🌊
+# V0.7.1 Flow 🌊
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/tw93/Kaku/main/assets/logo.png" alt="Kaku Logo" width="120" height="120" />
-  <h1 style="margin: 12px 0 6px;">Kaku V0.7.0</h1>
+  <h1 style="margin: 12px 0 6px;">Kaku V0.7.1</h1>
   <p><em>A fast, out-of-the-box terminal built for AI coding.</em></p>
 </div>
 
