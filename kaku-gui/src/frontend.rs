@@ -226,7 +226,18 @@ fn run_kaku_subcommand_in_new_tab(subcommand: &str, running_flag: Option<&'stati
             term_config,
         );
 
+        // Clear the running flag once the tab spawn has been issued.
+        // This does not wait for the subcommand to finish — it only prevents
+        // rapid duplicate menu clicks from opening a second tab before the
+        // first one has been created. spawn_command_impl has no completion
+        // callback, so finer-grained tracking would require hooking tab close.
         if let Some(flag_addr) = flag {
+            // SAFETY: flag_addr was cast from a `&'static AtomicBool`, so the
+            // pointed-to value is guaranteed to live for the duration of the
+            // process. The cast round-trip through usize is needed because
+            // async closures require `'static` captures, and raw pointers are
+            // `Send` while `&'static AtomicBool` is not capture-friendly across
+            // the spawn boundary without an explicit `move`.
             let flag_ref = unsafe { &*(flag_addr as *const AtomicBool) };
             flag_ref.store(false, Ordering::SeqCst);
         }
@@ -673,12 +684,21 @@ impl GuiFrontEnd {
                         // If we get here, there are no windows that could have received
                         // the QuitApplication command, therefore it must be ok to quit
                         // immediately
-                        if let Some(conn) = Connection::get() {
-                            conn.terminate_message_loop();
-                        } else {
-                            log::warn!(
-                                "Cannot terminate message loop for QuitApplication: GUI connection is not initialized"
+                        #[cfg(target_os = "macos")]
+                        {
+                            ::window::request_terminate(
+                                ::window::QuitOrigin::AppScopeQuitApplication,
                             );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            if let Some(conn) = Connection::get() {
+                                conn.terminate_message_loop();
+                            } else {
+                                log::warn!(
+                                    "Cannot terminate message loop for QuitApplication: GUI connection is not initialized"
+                                );
+                            }
                         }
                     }
                     KeyAssignment::SpawnWindow => {

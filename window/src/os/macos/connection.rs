@@ -5,7 +5,8 @@ use super::nsstring_to_str;
 use super::window::WindowInner;
 use crate::connection::ConnectionOps;
 use crate::os::macos::app::{
-    create_app_delegate, flush_pending_service_opens, sync_global_hotkey_registration,
+    create_app_delegate, flush_pending_service_opens, request_app_termination,
+    sync_global_hotkey_registration,
 };
 use crate::screen::{ScreenInfo, Screens};
 use crate::spawn::*;
@@ -22,6 +23,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuitOrigin {
+    AppKitShouldTerminate,
+    AppScopeQuitApplication,
+    WindowScopeQuitApplication,
+    ConfirmQuitOverlay,
+}
+
+pub fn request_terminate(origin: QuitOrigin) {
+    request_app_termination(origin, None);
+}
 
 pub struct Connection {
     ns_app: id,

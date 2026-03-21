@@ -148,7 +148,7 @@ impl CopyOverlay {
             window,
             delegate: Arc::clone(pane),
             start: None,
-            viewport: term_window.get_viewport(pane.pane_id()),
+            viewport: term_window.effective_viewport(pane),
             results: vec![],
             by_line: HashMap::new(),
             dirty_results: RangeSet::default(),

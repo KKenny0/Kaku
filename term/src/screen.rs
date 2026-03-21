@@ -1179,3 +1179,51 @@ fn phys_intersection(r1: &Range<PhysRowIndex>, r2: &Range<PhysRowIndex>) -> Rang
         0..0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::ColorPalette;
+    use crate::config::BidiMode;
+    use std::sync::Arc;
+    use wezterm_bidi::ParagraphDirectionHint;
+
+    #[derive(Debug)]
+    struct TestConfig;
+
+    impl TerminalConfiguration for TestConfig {
+        fn scrollback_size(&self) -> usize {
+            100
+        }
+
+        fn color_palette(&self) -> ColorPalette {
+            ColorPalette::default()
+        }
+    }
+
+    #[test]
+    fn stable_range_pruned_start_falls_back_to_bottom_window() {
+        let config: Arc<dyn TerminalConfiguration> = Arc::new(TestConfig);
+        let mut screen = Screen::new(
+            TerminalSize {
+                cols: 80,
+                rows: 3,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 96,
+            },
+            &config,
+            true,
+            0,
+            BidiMode {
+                enabled: false,
+                hint: ParagraphDirectionHint::LeftToRight,
+            },
+        );
+
+        screen.lines = (0..8).map(|_| Line::new(0)).collect();
+        screen.stable_row_index_offset = 10;
+
+        assert_eq!(screen.stable_range(&(8..11)), 5..8);
+    }
+}

@@ -27,6 +27,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use super::connection::QuitOrigin;
 use super::keycodes::{layout_printable_vkeys, phys_to_vkey};
 
 const CLS_NAME: &str = "KakuAppDelegate";
@@ -149,6 +150,44 @@ static SYSTEM_SLEEPING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_system_sleeping() -> bool {
     SYSTEM_SLEEPING.load(Ordering::Acquire)
+}
+
+fn app_window_context() -> (usize, bool) {
+    let Some(conn) = Connection::get() else {
+        return (0, false);
+    };
+
+    let windows = conn.windows.borrow();
+    let mut any_fullscreen = false;
+    for window in windows.values() {
+        if window.borrow_mut().is_fullscreen() {
+            any_fullscreen = true;
+            break;
+        }
+    }
+
+    (windows.len(), any_fullscreen)
+}
+
+fn log_quit_request(origin: QuitOrigin, detail: Option<&str>) {
+    let (window_count, has_fullscreen) = app_window_context();
+    let detail = detail.unwrap_or("none");
+
+    log::warn!(
+        "quit requested origin={origin:?} detail={detail} window_count={window_count} has_fullscreen={has_fullscreen}"
+    );
+}
+
+pub fn request_app_termination(origin: QuitOrigin, detail: Option<&str>) {
+    log_quit_request(origin, detail);
+
+    if let Some(conn) = Connection::get() {
+        conn.terminate_message_loop();
+    } else {
+        log::warn!(
+            "Cannot terminate message loop for {origin:?}: GUI connection is not initialized"
+        );
+    }
 }
 
 fn note_service_open_request() {
@@ -560,7 +599,10 @@ extern "C" fn application_should_terminate(
 ) -> u64 {
     unsafe {
         match config::configuration().window_close_confirmation {
-            WindowCloseConfirmation::NeverPrompt => terminate_now(),
+            WindowCloseConfirmation::NeverPrompt => terminate_now(
+                QuitOrigin::AppKitShouldTerminate,
+                Some("applicationShouldTerminate"),
+            ),
             WindowCloseConfirmation::AlwaysPrompt => {
                 let alert: id = msg_send![class!(NSAlert), alloc];
                 let alert: id = msg_send![alert, init];
@@ -582,7 +624,10 @@ extern "C" fn application_should_terminate(
                 if result == NSModalResponseCancel {
                     NSApplicationTerminateReply::NSTerminateCancel as u64
                 } else {
-                    terminate_now()
+                    terminate_now(
+                        QuitOrigin::AppKitShouldTerminate,
+                        Some("applicationShouldTerminate"),
+                    )
                 }
             }
         }
@@ -599,16 +644,14 @@ extern "C" fn application_should_terminate_after_last_window_closed(
     NO
 }
 
-fn terminate_now() -> u64 {
+fn terminate_now(origin: QuitOrigin, detail: Option<&str>) -> u64 {
     // Persist the key (frontmost) window's geometry before the event loop
     // stops. This is the reliable save path for Cmd+Q; window_will_close
     // may not fire for every window before the process exits.
     super::window::on_app_terminating();
     reap_kaku_autofill_helpers();
     uninstall_registered_hotkey(&mut GLOBAL_HOTKEY_STATE.lock().unwrap());
-    if let Some(conn) = Connection::get() {
-        conn.terminate_message_loop();
-    }
+    request_app_termination(origin, detail);
     NSApplicationTerminateReply::NSTerminateNow as u64
 }
 

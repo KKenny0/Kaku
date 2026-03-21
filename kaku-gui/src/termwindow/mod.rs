@@ -2858,7 +2858,7 @@ impl TermWindow {
             return None;
         }
 
-        let is_scrolled = self.get_viewport(pane.pane_id()).is_some();
+        let is_scrolled = self.effective_viewport(pane).is_some();
         let is_dragging = self.scrollbar_is_dragging();
         let is_hovering = matches!(
             &self.current_mouse_event,
@@ -3539,9 +3539,7 @@ impl TermWindow {
             pane.set_primary_peek(false);
         }
         let dims = pane.get_dimensions();
-        let position = self
-            .get_viewport(pane.pane_id())
-            .unwrap_or(dims.physical_top);
+        let position = self.effective_viewport(pane).unwrap_or(dims.physical_top);
         let zone = {
             let zones = self.get_semantic_prompt_zones(&pane);
             let idx = match zones.binary_search(&position) {
@@ -3562,13 +3560,11 @@ impl TermWindow {
 
     fn scroll_by_page(&mut self, amount: f64, pane: &Arc<dyn Pane>) -> anyhow::Result<()> {
         let dims = pane.get_dimensions();
-        let position = self
-            .get_viewport(pane.pane_id())
-            .unwrap_or(dims.physical_top) as f64
+        let position = self.effective_viewport(pane).unwrap_or(dims.physical_top) as f64
             + (amount * dims.viewport_rows as f64);
         self.set_viewport(pane.pane_id(), Some(position as isize), dims);
         // Exit peek mode when scrolling to bottom
-        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+        if pane.is_primary_peek() && self.effective_viewport(pane).is_none() {
             pane.set_primary_peek(false);
         }
         if let Some(win) = self.window.as_ref() {
@@ -3599,7 +3595,7 @@ impl TermWindow {
 
         let dims = pane.get_dimensions();
         let position = self
-            .get_viewport(pane.pane_id())
+            .effective_viewport(pane)
             .unwrap_or(dims.physical_top)
             .saturating_add(amount);
 
@@ -3607,7 +3603,7 @@ impl TermWindow {
         self.set_viewport(pane.pane_id(), Some(position), dims);
 
         // Scroll to bottom → exit peek, return to alt screen
-        if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+        if pane.is_primary_peek() && self.effective_viewport(pane).is_none() {
             pane.set_primary_peek(false);
         }
 
@@ -3877,8 +3873,17 @@ impl TermWindow {
 
                 match config.window_close_confirmation {
                     WindowCloseConfirmation::NeverPrompt => {
-                        let con = Connection::get().expect("call on gui thread");
-                        con.terminate_message_loop();
+                        #[cfg(target_os = "macos")]
+                        {
+                            ::window::request_terminate(
+                                ::window::QuitOrigin::WindowScopeQuitApplication,
+                            );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let con = Connection::get().expect("call on gui thread");
+                            con.terminate_message_loop();
+                        }
                     }
                     WindowCloseConfirmation::AlwaysPrompt => {
                         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -4742,6 +4747,26 @@ impl TermWindow {
         self.pane_state(pane_id).viewport
     }
 
+    pub fn effective_viewport(&self, pane: &Arc<dyn Pane>) -> Option<StableRowIndex> {
+        let pane_id = pane.pane_id();
+        let dims = pane.get_dimensions();
+        let viewport = self.get_viewport(pane_id);
+        let effective = Self::normalize_viewport(viewport, dims);
+
+        if effective != viewport {
+            log::trace!(
+                "effective_viewport: pane={} normalized {:?} -> {:?} physical_top={} scrollback_top={}",
+                pane_id,
+                viewport,
+                effective,
+                dims.physical_top,
+                dims.scrollback_top,
+            );
+        }
+
+        effective
+    }
+
     fn normalize_viewport(
         position: Option<StableRowIndex>,
         dims: RenderableDimensions,
@@ -5499,6 +5524,18 @@ mod tests {
         );
         assert_eq!(
             TermWindow::normalize_viewport(Some(180), dims(150, 100)),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_viewport_preserves_scroll_until_output_prunes_it() {
+        assert_eq!(
+            TermWindow::normalize_viewport(Some(120), dims(140, 100)),
+            Some(120)
+        );
+        assert_eq!(
+            TermWindow::normalize_viewport(Some(120), dims(150, 121)),
             None
         );
     }

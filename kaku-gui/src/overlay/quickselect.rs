@@ -235,7 +235,7 @@ impl QuickSelectOverlay {
         pane: &Arc<dyn Pane>,
         args: &QuickSelectArguments,
     ) -> Arc<dyn Pane> {
-        let viewport = term_window.get_viewport(pane.pane_id());
+        let viewport = term_window.effective_viewport(pane);
         let dims = pane.get_dimensions();
 
         let config = term_window.config.clone();

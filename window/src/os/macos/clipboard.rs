@@ -1,5 +1,5 @@
-use crate::ClipboardData;
 use crate::macos::{nsstring, nsstring_to_str};
+use crate::ClipboardData;
 use cocoa::appkit::{NSFilenamesPboardType, NSPasteboard, NSStringPboardType};
 use cocoa::base::*;
 use cocoa::foundation::NSArray;

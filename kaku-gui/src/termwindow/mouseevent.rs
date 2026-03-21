@@ -672,7 +672,7 @@ impl super::TermWindow {
         };
 
         let dims = pane.get_dimensions();
-        let current_viewport = self.get_viewport(pane.pane_id());
+        let current_viewport = self.effective_viewport(&pane);
 
         let Some(track) = self.scrollbar_track_for_pane(&pane) else {
             return;
@@ -962,7 +962,7 @@ impl super::TermWindow {
     ) {
         if let WMEK::Press(MousePress::Left) = event.kind {
             let dims = pane.get_dimensions();
-            let current_viewport = self.get_viewport(pane.pane_id());
+            let current_viewport = self.effective_viewport(&pane);
             // Page up
             self.reveal_scrollbar();
             self.set_viewport(
@@ -988,7 +988,7 @@ impl super::TermWindow {
     ) {
         if let WMEK::Press(MousePress::Left) = event.kind {
             let dims = pane.get_dimensions();
-            let current_viewport = self.get_viewport(pane.pane_id());
+            let current_viewport = self.effective_viewport(&pane);
             // Page down
             self.reveal_scrollbar();
             self.set_viewport(
@@ -1001,7 +1001,7 @@ impl super::TermWindow {
                 dims,
             );
             // Exit peek mode when scrolling to bottom
-            if pane.is_primary_peek() && self.get_viewport(pane.pane_id()).is_none() {
+            if pane.is_primary_peek() && self.effective_viewport(&pane).is_none() {
                 pane.set_primary_peek(false);
             }
             context.invalidate();
@@ -1197,10 +1197,8 @@ impl super::TermWindow {
         );
 
         let dims = pane.get_dimensions();
-        let stable_row = self
-            .get_viewport(pane.pane_id())
-            .unwrap_or(dims.physical_top)
-            + row as StableRowIndex;
+        let stable_row =
+            self.effective_viewport(&pane).unwrap_or(dims.physical_top) + row as StableRowIndex;
 
         self.pane_state(pane.pane_id())
             .mouse_terminal_coords

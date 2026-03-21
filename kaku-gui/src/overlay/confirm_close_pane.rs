@@ -84,9 +84,16 @@ pub fn confirm_quit_program(
         &mut term,
     )? {
         promise::spawn::spawn_into_main_thread(async move {
-            use ::window::{Connection, ConnectionOps};
-            let con = Connection::get().expect("call on gui thread");
-            con.terminate_message_loop();
+            #[cfg(target_os = "macos")]
+            {
+                ::window::request_terminate(::window::QuitOrigin::ConfirmQuitOverlay);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                use ::window::{Connection, ConnectionOps};
+                let con = Connection::get().expect("call on gui thread");
+                con.terminate_message_loop();
+            }
         })
         .detach();
     }

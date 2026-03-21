@@ -279,7 +279,7 @@ impl crate::TermWindow {
                     let top = panes
                         .iter()
                         .find(|p| p.is_active)
-                        .map(|p| match self.get_viewport(p.pane.pane_id()) {
+                        .map(|p| match self.effective_viewport(&p.pane) {
                             Some(top) => top,
                             None => p.pane.get_dimensions().physical_top,
                         })

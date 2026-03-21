@@ -210,7 +210,7 @@ impl crate::TermWindow {
         }
 
         let pane_id = pos.pane.pane_id();
-        let current_viewport = self.get_viewport(pane_id);
+        let current_viewport = self.effective_viewport(&pos.pane);
         let dims = pos.pane.get_dimensions();
 
         let gl_state = self.render_state.as_ref().unwrap();
