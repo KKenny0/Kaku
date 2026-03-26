@@ -16,7 +16,10 @@ impl crate::TermWindow {
         let cell_width = self.render_metrics.cell_size.width as f32;
         let cell_height = self.render_metrics.cell_size.height as f32;
 
-        let foreground = palette.split.to_linear();
+        let foreground = palette
+            .split
+            .to_linear()
+            .mul_alpha(self.config.window_background_opacity);
 
         let border = self.get_os_border();
         let first_row_offset = if self.show_tab_bar && !self.config.tab_bar_at_bottom {
