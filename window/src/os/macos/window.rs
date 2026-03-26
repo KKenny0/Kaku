@@ -3771,7 +3771,9 @@ impl WindowView {
                     // spin the event loop synchronously, routing another Cmd+Q through
                     // kaku_perform_key_assignment before the outer borrow_mut is released.
                     if let Ok(mut inner) = this.inner.try_borrow_mut() {
-                        inner.events.dispatch(WindowEvent::PerformKeyAssignment(action));
+                        inner
+                            .events
+                            .dispatch(WindowEvent::PerformKeyAssignment(action));
                     }
                 }
             }

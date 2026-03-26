@@ -7,8 +7,8 @@ use crate::termwindow::render::corners::{
 use crate::termwindow::render::forces_opaque_kaku_tui_window_background;
 use crate::termwindow::{DimensionContext, RenderFrame, TermWindowNotif};
 use crate::utilsprites::RenderMetrics;
-use ::window::bitmaps::atlas::OutOfTextureSpace;
 use ::window::WindowOps;
+use ::window::bitmaps::atlas::OutOfTextureSpace;
 use anyhow::Context;
 use config::Dimension;
 use smol::Timer;
@@ -300,13 +300,14 @@ impl crate::TermWindow {
                     // Avoid doubling up the background color for the main pane area.
                     // We still need to paint strips that are intentionally excluded
                     // from pane background quads.
-                    let strip_background = if panes.len() == 1 {
-                        panes[0].pane.palette().background
-                    } else {
-                        self.palette().background
-                    }
-                    .to_linear()
-                    .mul_alpha(self.config.window_background_opacity);
+                    let strip_background = panes
+                        .iter()
+                        .find(|pane| pane.is_active)
+                        .or_else(|| panes.first())
+                        .map(|pane| pane.pane.palette().background)
+                        .unwrap_or_else(|| self.palette().background)
+                        .to_linear()
+                        .mul_alpha(self.config.window_background_opacity);
                     let border = self.get_os_border();
                     let tab_bar_height = if self.show_tab_bar {
                         self.tab_bar_pixel_height()

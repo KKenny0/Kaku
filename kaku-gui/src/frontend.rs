@@ -149,7 +149,7 @@ pub fn open_kaku_config() {
             },
             SpawnWhere::NewTab,
             size,
-            None,
+            try_front_end().and_then(|fe| fe.gui_windows().first().map(|w| w.mux_window_id)),
             term_config,
         );
     })

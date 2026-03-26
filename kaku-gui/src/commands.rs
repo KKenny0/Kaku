@@ -848,16 +848,23 @@ impl CommandDef {
 
                         menu.add_item(&MenuItem::new_separator());
 
+                        #[allow(unexpected_cfgs)] // <https://github.com/SSheldon/rust-objc/issues/125>
+                        let show_settings_window_sel = sel!(showSettingsWindow:);
+                        let app_delegate = unsafe {
+                            let app = cocoa::appkit::NSApp();
+                            let delegate: cocoa::base::id = msg_send![app, delegate];
+                            delegate
+                        };
                         let settings_item = MenuItem::new_with(
                             "Settings...",
-                            Some(kaku_perform_key_assignment_sel),
+                            Some(show_settings_window_sel),
                             ",",
                         );
                         settings_item
                             .set_key_equiv_modifier_mask(NSEventModifierFlags::NSCommandKeyMask);
-                        settings_item.set_represented_item(RepresentedItem::KeyAssignment(
-                            KeyAssignment::EmitEvent("open-kaku-config".to_string()),
-                        ));
+                        if !app_delegate.is_null() {
+                            settings_item.set_target(app_delegate);
+                        }
                         menu.add_item(&settings_item);
 
                         let check_update = MenuItem::new_with(
