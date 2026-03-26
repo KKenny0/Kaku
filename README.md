@@ -127,7 +127,18 @@ Kaku includes a built-in assistant for command-line error recovery and a single 
 Open AI settings with `kaku ai` to configure your external AI tools and edit **Kaku Assistant** details after it is enabled.
 For enterprise gateway/proxy headers, edit `~/.config/kaku/assistant.toml` and set `custom_headers` there.
 
-Tip: DeepSeek-V3.2 is a great low-cost option to start with for everyday AI coding tasks.
+### Provider Presets
+
+Kaku Assistant supports built-in provider presets for quick setup. Select a provider from the dropdown in `kaku ai` to auto-fill the API base URL and available models:
+
+| Provider | Base URL | Models |
+| :--- | :--- | :--- |
+| VivGrid (default) | `https://api.vivgrid.com/v1` | DeepSeek-V3.2 |
+| [MiniMax](https://www.minimax.io) | `https://api.minimax.io/v1` | MiniMax-M2.7, M2.7-highspeed, M2.5, M2.5-highspeed |
+| OpenAI | `https://api.openai.com/v1` | (auto-detected) |
+| Custom | (manual) | (manual) |
+
+To use MiniMax, select "MiniMax" as the provider, enter your API key from [MiniMax Platform](https://platform.minimax.chat), and choose a model. MiniMax-M2.7 (1M context) is recommended for everyday AI coding tasks.
 
 When Kaku Assistant has a suggestion ready after a command error, press `Cmd + Shift + E` to apply it.
 
