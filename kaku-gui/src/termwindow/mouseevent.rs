@@ -1451,6 +1451,28 @@ impl super::TermWindow {
                     self.scroll_to_bottom(&pane);
                 }
 
+                // Option+Click: move cursor to the clicked column on the same line.
+                // Only fires when the shell owns the prompt (no mouse grab, no alt screen).
+                if !pane.is_mouse_grabbed()
+                    && !pane.is_alt_screen_active()
+                    && matches!(event.kind, WMEK::Press(MousePress::Left))
+                    && modifiers.contains(window::Modifiers::ALT)
+                {
+                    let cursor = pane.get_cursor_position();
+                    if stable_row == cursor.y {
+                        let delta = column as isize - cursor.x as isize;
+                        if delta != 0 {
+                            let arrow: &[u8] = if delta > 0 { b"\x1b[C" } else { b"\x1b[D" };
+                            let bytes: Vec<u8> = arrow.repeat(delta.unsigned_abs());
+                            if let Err(err) = self.write_terminal_input_bytes(&pane, &bytes) {
+                                log::debug!("option+click cursor move failed: {err:#}");
+                            }
+                            self.maybe_scroll_to_bottom_for_input(&pane);
+                        }
+                        return;
+                    }
+                }
+
                 // normalize delta and streak to make mouse assignment
                 // easier to wrangle
                 match event_trigger_type {
