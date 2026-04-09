@@ -704,7 +704,7 @@ install_yazi_wrapper
 AUTOSUGGEST_CLI_PROVIDER=""
 if command -v kiro-cli >/dev/null 2>&1; then
 	AUTOSUGGEST_CLI_PROVIDER="kiro-cli"
-elif command -v q >/dev/null 2>&1; then
+elif command -v q >/dev/null 2>&1 && q --version 2>/dev/null | grep -qi 'amazon'; then
 	AUTOSUGGEST_CLI_PROVIDER="q"
 fi
 
@@ -1541,8 +1541,6 @@ has_kaku_tmux_source_line() {
 }
 
 ensure_kaku_tmux_integration() {
-	# GUI-launched shells inherit a minimal PATH (no Homebrew). Probe common
-	# install locations so tmux is found even when PATH is stripped down.
 	# GUI-launched shells inherit a minimal PATH (no Homebrew/MacPorts). Probe
 	# common install locations so tmux is found even when PATH is stripped down.
 	local tmux_cmd=""

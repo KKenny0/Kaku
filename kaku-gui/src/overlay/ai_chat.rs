@@ -1,13 +1,15 @@
 //! AI conversation overlay for Kaku.
 //!
-//! Activated via Cmd+Shift+I. Renders a full-pane chat TUI using raw termwiz
-//! Change sequences, communicating with the LLM via a background thread and
+//! Activated via Cmd+Shift+Space. Renders a full-pane chat TUI using raw termwiz
+//! change sequences, communicating with the LLM via a background thread and
 //! std::sync::mpsc for streaming tokens.
 
 use crate::ai_client::{AiClient, ApiMessage, AssistantConfig};
 use mux::pane::PaneId;
 use mux::termwiztermtab::TermWizTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 use termwiz::cell::{AttributeChange, CellAttributes};
 use termwiz::color::{AnsiColor, ColorAttribute};
@@ -19,7 +21,6 @@ use termwiz::terminal::Terminal;
 pub struct TerminalContext {
     pub cwd: String,
     pub visible_lines: Vec<String>,
-    pub git_branch: Option<String>,
 }
 
 // ─── Message model ───────────────────────────────────────────────────────────
@@ -36,6 +37,8 @@ struct Message {
     content: String,
     /// False while the assistant is still streaming.
     complete: bool,
+    /// True for UI-only messages (e.g. welcome text) that are not sent to the API.
+    is_context: bool,
 }
 
 // ─── Streaming tokens ────────────────────────────────────────────────────────
@@ -48,6 +51,9 @@ enum StreamMsg {
 
 // ─── App state ───────────────────────────────────────────────────────────────
 
+/// Maximum number of user+assistant exchange pairs to include in API context.
+const MAX_HISTORY_PAIRS: usize = 10;
+
 struct App {
     messages: Vec<Message>,
     input: String,
@@ -57,6 +63,8 @@ struct App {
     is_streaming: bool,
     model: String,
     token_rx: Option<Receiver<StreamMsg>>,
+    /// Cancel flag shared with the background streaming thread.
+    cancel_flag: Arc<AtomicBool>,
     cols: usize,
     rows: usize,
     error: Option<String>,
@@ -74,6 +82,7 @@ impl App {
             is_streaming: false,
             model,
             token_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
             cols,
             rows,
             error: None,
@@ -105,23 +114,29 @@ impl App {
             role: Role::User,
             content: text,
             complete: true,
+            is_context: false,
         });
         // Placeholder for the streaming assistant response.
         self.messages.push(Message {
             role: Role::Assistant,
             content: String::new(),
             complete: false,
+            is_context: false,
         });
         self.is_streaming = true;
 
         let (tx, rx): (Sender<StreamMsg>, Receiver<StreamMsg>) = mpsc::channel();
         self.token_rx = Some(rx);
 
+        // Reset cancel flag for this new request.
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        let cancel = Arc::clone(&self.cancel_flag);
+
         let api_messages = self.build_api_messages();
         std::thread::spawn(move || {
             let client = AiClient::new(client_cfg);
             let tx_token = tx.clone();
-            let result = client.chat_stream(&api_messages, &mut |token| {
+            let result = client.chat_stream(&api_messages, &cancel, &mut |token| {
                 let _ = tx_token.send(StreamMsg::Token(token.to_string()));
             });
             match result {
@@ -139,7 +154,15 @@ impl App {
         let mut out = Vec::new();
         let sys = build_system_prompt(&self.context);
         out.push(ApiMessage::system(sys));
-        for msg in &self.messages {
+
+        // Collect real (non-context) exchange pairs, then keep the last N.
+        let real: Vec<&Message> = self
+            .messages
+            .iter()
+            .filter(|m| !m.is_context)
+            .collect();
+        let skip = real.len().saturating_sub(MAX_HISTORY_PAIRS * 2);
+        for msg in real.into_iter().skip(skip) {
             match msg.role {
                 Role::User => out.push(ApiMessage::user(msg.content.clone())),
                 Role::Assistant if msg.complete => {
@@ -366,8 +389,9 @@ fn render(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         "─".repeat(inner_w.saturating_sub(0))
     )));
 
-    // 7. Position cursor at the end of the input text.
-    let cursor_col = (prompt.len() + app.input.len() + 1).min(cols.saturating_sub(2));
+    // 7. Position cursor at the end of the input text (use char counts, not byte lengths).
+    let cursor_col =
+        (prompt.chars().count() + app.input.chars().count() + 1).min(cols.saturating_sub(2));
     changes.push(Change::CursorPosition {
         x: Position::Absolute(cursor_col),
         y: Position::Absolute(input_row),
@@ -386,8 +410,11 @@ enum Action {
 
 fn handle_key(key: &KeyEvent, app: &mut App, client_cfg: &AssistantConfig) -> Action {
     match (&key.key, key.modifiers) {
-        // Exit
-        (KeyCode::Escape, _) | (KeyCode::Char('C'), Modifiers::CTRL) => Action::Quit,
+        // Exit: signal any running stream to stop.
+        (KeyCode::Escape, _) | (KeyCode::Char('C'), Modifiers::CTRL) => {
+            app.cancel_flag.store(true, Ordering::Relaxed);
+            Action::Quit
+        }
 
         // Submit
         (KeyCode::Enter, Modifiers::NONE) if !app.is_streaming => {
@@ -416,7 +443,9 @@ fn handle_key(key: &KeyEvent, app: &mut App, client_cfg: &AssistantConfig) -> Ac
 
         // Scroll up/down in message history
         (KeyCode::UpArrow, _) | (KeyCode::PageUp, _) => {
-            app.scroll_offset = app.scroll_offset.saturating_add(3);
+            let total = app.display_lines().len();
+            let max_offset = total.saturating_sub(app.msg_area_height());
+            app.scroll_offset = app.scroll_offset.saturating_add(3).min(max_offset);
             Action::Continue
         }
         (KeyCode::DownArrow, _) | (KeyCode::PageDown, _) => {
@@ -457,7 +486,9 @@ fn handle_mouse(event: &MouseEvent, app: &mut App) {
     // Scroll wheel support
     if event.mouse_buttons.contains(MouseButtons::VERT_WHEEL) {
         if event.mouse_buttons.contains(MouseButtons::WHEEL_POSITIVE) {
-            app.scroll_offset = app.scroll_offset.saturating_add(2);
+            let total = app.display_lines().len();
+            let max_offset = total.saturating_sub(app.msg_area_height());
+            app.scroll_offset = app.scroll_offset.saturating_add(2).min(max_offset);
         } else {
             app.scroll_offset = app.scroll_offset.saturating_sub(2);
         }
@@ -497,11 +528,12 @@ pub fn ai_chat_overlay(
     let mut app = App::new(context, model, cols, rows);
     let mut needs_redraw = true;
 
-    // Welcome message
+    // Welcome message: shown in UI only, not sent to the API.
     app.messages.push(Message {
         role: Role::Assistant,
         content: "Hello! I'm your Kaku AI assistant. How can I help you today?".to_string(),
         complete: true,
+        is_context: true,
     });
 
     loop {
@@ -516,10 +548,11 @@ pub fn ai_chat_overlay(
         }
 
         // Poll with a short timeout so we can check the token channel regularly.
+        // Use a longer idle timeout when not streaming to reduce CPU usage.
         let timeout = if app.is_streaming {
             Some(Duration::from_millis(30))
         } else {
-            Some(Duration::from_millis(100))
+            Some(Duration::from_millis(500))
         };
 
         match term.poll_input(timeout)? {
@@ -568,9 +601,6 @@ fn build_system_prompt(ctx: &TerminalContext) -> String {
     );
     if !ctx.cwd.is_empty() {
         s.push_str(&format!("Current directory: {}\n", ctx.cwd));
-    }
-    if let Some(branch) = &ctx.git_branch {
-        s.push_str(&format!("Git branch: {}\n", branch));
     }
     if !ctx.visible_lines.is_empty() {
         let snippet: String = ctx

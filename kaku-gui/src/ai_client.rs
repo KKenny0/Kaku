@@ -8,9 +8,10 @@
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-const DEFAULT_MODEL: &str = "DeepSeek-V3.2";
-const DEFAULT_BASE_URL: &str = "https://api.vivgrid.com/v1";
+const DEFAULT_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Configuration loaded from `assistant.toml`.
 #[derive(Clone)]
@@ -106,19 +107,20 @@ impl AiClient {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+            .unwrap_or_else(|e| {
+                log::warn!("Failed to build HTTP client: {e}; falling back to default client");
+                reqwest::blocking::Client::new()
+            });
         Self { config, client }
     }
 
-    pub fn model(&self) -> &str {
-        &self.config.model
-    }
-
     /// Stream a chat completion. Calls `on_token` for each streamed token.
+    /// Stops early if `cancelled` is set to `true`.
     /// Returns the complete response text on success.
     pub fn chat_stream(
         &self,
         messages: &[ApiMessage],
+        cancelled: &AtomicBool,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let url = format!("{}/chat/completions", self.config.base_url);
@@ -151,6 +153,9 @@ impl AiClient {
         let mut full = String::new();
 
         for line in reader.lines() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
             let line = line.context("read SSE line")?;
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
@@ -158,16 +163,21 @@ impl AiClient {
             if data.trim() == "[DONE]" {
                 break;
             }
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(token) = chunk
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                {
-                    on_token(token);
-                    full.push_str(token);
+            match serde_json::from_str::<serde_json::Value>(data) {
+                Ok(chunk) => {
+                    if let Some(token) = chunk
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                    {
+                        on_token(token);
+                        full.push_str(token);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse SSE chunk: {e} — data: {data}");
                 }
             }
         }

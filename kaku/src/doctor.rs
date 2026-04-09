@@ -641,11 +641,25 @@ fn build_local_network_check() -> DoctorCheck {
 fn detect_external_autosuggest_cli_provider() -> Option<&'static str> {
     if path_has_executable("kiro-cli") {
         Some("kiro-cli")
-    } else if path_has_executable("q") {
+    } else if path_has_executable("q") && is_amazon_q_cli() {
         Some("q")
     } else {
         None
     }
+}
+
+/// Verify the `q` binary is Amazon Q CLI by checking its version output.
+/// Guards against false positives from other tools named `q`.
+fn is_amazon_q_cli() -> bool {
+    std::process::Command::new("q")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            out.to_lowercase().contains("amazon")
+        })
+        .unwrap_or(false)
 }
 
 fn path_has_executable(name: &str) -> bool {
