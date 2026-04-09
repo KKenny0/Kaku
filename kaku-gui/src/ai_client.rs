@@ -97,6 +97,8 @@ impl ApiMessage {
 }
 
 /// Synchronous AI client for use inside overlay threads.
+/// Clone is cheap: reqwest::blocking::Client is Arc-backed internally.
+#[derive(Clone)]
 pub struct AiClient {
     config: AssistantConfig,
     client: reqwest::blocking::Client,

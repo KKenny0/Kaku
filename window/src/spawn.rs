@@ -86,7 +86,8 @@ impl SpawnQueue {
 
     // This needs to be a separate function from the loop in `run`
     // in order for the lock to be released before we call the
-    // returned function
+    // returned function. Used by Linux/Windows run_impl; macOS uses batch drain.
+    #[allow(dead_code)]
     fn pop_func(&self) -> Option<SpawnFunc> {
         if let Some(func) = Self::lock_recover(&self.spawned_funcs, "spawned_funcs").pop_front() {
             metrics::histogram!("executor.spawn_delay").record(func.at.elapsed());
@@ -241,13 +242,15 @@ impl SpawnQueue {
         let spawned_funcs = Mutex::new(VecDeque::new());
         let spawned_funcs_low_pri = Mutex::new(VecDeque::new());
 
-        // Use kCFRunLoopBeforeWaiting instead of kCFRunLoopAllActivities so the
-        // observer only fires once per idle cycle rather than on every activity
-        // flag, reducing unnecessary runloop wakeups and CPU wake events.
+        // Fire on AfterWaiting (runloop just woke up) so spawn callbacks triggered
+        // by keyboard/timer events are processed immediately in the same turn,
+        // keeping input latency low. BeforeWaiting clears any remaining items
+        // before the runloop sleeps again. Using both is cheaper than
+        // kCFRunLoopAllActivities while still being responsive.
         let observer = unsafe {
             CFRunLoopObserverCreate(
                 std::ptr::null(),
-                kCFRunLoopBeforeWaiting,
+                kCFRunLoopBeforeWaiting | kCFRunLoopAfterWaiting,
                 1,
                 0,
                 SpawnQueue::trigger,
@@ -293,10 +296,34 @@ impl SpawnQueue {
     }
 
     fn run_impl_burst(&self, max_funcs: usize) -> bool {
-        for _ in 0..max_funcs {
-            let Some(func) = self.pop_func() else {
-                break;
-            };
+        // Drain both queues under a single lock each so the burst loop
+        // does 2 lock acquisitions instead of up to 2*max_funcs.
+        let mut batch: Vec<SpawnFunc> = {
+            let mut q =
+                Self::lock_recover(&self.spawned_funcs, "spawned_funcs");
+            let n = max_funcs.min(q.len());
+            q.drain(..n)
+                .map(|f| {
+                    metrics::histogram!("executor.spawn_delay")
+                        .record(f.at.elapsed());
+                    f.func
+                })
+                .collect()
+        };
+        let remaining = max_funcs.saturating_sub(batch.len());
+        if remaining > 0 {
+            let mut q = Self::lock_recover(
+                &self.spawned_funcs_low_pri,
+                "spawned_funcs_low_pri",
+            );
+            let n = remaining.min(q.len());
+            batch.extend(q.drain(..n).map(|f| {
+                metrics::histogram!("executor.spawn_delay.low_pri")
+                    .record(f.at.elapsed());
+                f.func
+            }));
+        }
+        for func in batch {
             func();
         }
         self.has_any_queued()

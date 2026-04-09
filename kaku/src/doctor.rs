@@ -650,16 +650,41 @@ fn detect_external_autosuggest_cli_provider() -> Option<&'static str> {
 
 /// Verify the `q` binary is Amazon Q CLI by checking its version output.
 /// Guards against false positives from other tools named `q`.
+/// Uses spawn()+try_wait() with a 3s timeout to avoid blocking indefinitely.
 fn is_amazon_q_cli() -> bool {
-    std::process::Command::new("q")
+    let mut child = match std::process::Command::new("q")
         .arg("--version")
-        .output()
-        .ok()
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            out.to_lowercase().contains("amazon")
-        })
-        .unwrap_or(false)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .ok()
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .to_lowercase()
+                            .contains("amazon")
+                    })
+                    .unwrap_or(false);
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn path_has_executable(name: &str) -> bool {

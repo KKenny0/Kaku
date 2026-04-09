@@ -65,15 +65,21 @@ struct App {
     token_rx: Option<Receiver<StreamMsg>>,
     /// Cancel flag shared with the background streaming thread.
     cancel_flag: Arc<AtomicBool>,
+    /// Reused HTTP client; Clone is cheap (Arc-backed).
+    client: AiClient,
     cols: usize,
     rows: usize,
     error: Option<String>,
     /// Context to include in the first system message.
     context: TerminalContext,
+    /// Cached result of display_lines(). Rebuilt only when dirty.
+    cached_display_lines: Vec<DisplayLine>,
+    /// True when messages or layout changed and cache must be rebuilt.
+    display_lines_dirty: bool,
 }
 
 impl App {
-    fn new(context: TerminalContext, model: String, cols: usize, rows: usize) -> Self {
+    fn new(context: TerminalContext, model: String, cols: usize, rows: usize, client: AiClient) -> Self {
         Self {
             messages: Vec::new(),
             input: String::new(),
@@ -83,11 +89,45 @@ impl App {
             model,
             token_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            client,
             cols,
             rows,
             error: None,
             context,
+            cached_display_lines: Vec::new(),
+            display_lines_dirty: true,
         }
+    }
+
+    /// Rebuild cached_display_lines if dirty.
+    fn rebuild_display_cache(&mut self) {
+        if !self.display_lines_dirty {
+            return;
+        }
+        let w = self.content_width().max(4);
+        let mut lines: Vec<DisplayLine> = Vec::new();
+        let wrap_opts = textwrap::Options::new(w).break_words(true);
+
+        for msg in &self.messages {
+            lines.push(DisplayLine::Header(msg.role.clone()));
+            let content_to_wrap = if msg.content.is_empty() && !msg.complete {
+                "▋".to_string()
+            } else {
+                msg.content.clone()
+            };
+            for raw_line in content_to_wrap.lines() {
+                for wrapped in textwrap::wrap(raw_line, &wrap_opts) {
+                    lines.push(DisplayLine::Text {
+                        text: wrapped.into_owned(),
+                        role: msg.role.clone(),
+                    });
+                }
+            }
+            lines.push(DisplayLine::Blank);
+        }
+
+        self.cached_display_lines = lines;
+        self.display_lines_dirty = false;
     }
 
     fn content_width(&self) -> usize {
@@ -100,7 +140,7 @@ impl App {
     }
 
     /// Submit the current input as a user message and kick off a stream.
-    fn submit(&mut self, client_cfg: AssistantConfig) {
+    fn submit(&mut self) {
         let text = self.input.trim().to_string();
         if text.is_empty() {
             return;
@@ -124,6 +164,7 @@ impl App {
             is_context: false,
         });
         self.is_streaming = true;
+        self.display_lines_dirty = true;
 
         let (tx, rx): (Sender<StreamMsg>, Receiver<StreamMsg>) = mpsc::channel();
         self.token_rx = Some(rx);
@@ -132,9 +173,10 @@ impl App {
         self.cancel_flag.store(false, Ordering::Relaxed);
         let cancel = Arc::clone(&self.cancel_flag);
 
+        // Clone the client (cheap: Arc-backed) for the background thread.
+        let client = self.client.clone();
         let api_messages = self.build_api_messages();
         std::thread::spawn(move || {
-            let client = AiClient::new(client_cfg);
             let tx_token = tx.clone();
             let result = client.chat_stream(&api_messages, &cancel, &mut |token| {
                 let _ = tx_token.send(StreamMsg::Token(token.to_string()));
@@ -208,39 +250,16 @@ impl App {
                 Err(_) => break, // empty or disconnected
             }
         }
+        if changed {
+            self.display_lines_dirty = true;
+        }
         changed
     }
 
-    /// Build the flat list of lines to display in the message area.
-    fn display_lines(&self) -> Vec<DisplayLine> {
-        let w = self.content_width().max(4);
-        let mut lines: Vec<DisplayLine> = Vec::new();
-        let wrap_opts = textwrap::Options::new(w).break_words(true);
-
-        for msg in &self.messages {
-            // Role header
-            lines.push(DisplayLine::Header(msg.role.clone()));
-
-            // Wrapped content
-            let content_to_wrap = if msg.content.is_empty() && !msg.complete {
-                "▋".to_string() // blinking cursor placeholder
-            } else {
-                msg.content.clone()
-            };
-
-            for raw_line in content_to_wrap.lines() {
-                for wrapped in textwrap::wrap(raw_line, &wrap_opts) {
-                    lines.push(DisplayLine::Text {
-                        text: wrapped.into_owned(),
-                        role: msg.role.clone(),
-                    });
-                }
-            }
-            // Blank separator between messages
-            lines.push(DisplayLine::Blank);
-        }
-
-        lines
+    /// Return the cached flat list of display lines.
+    /// Call rebuild_display_cache() first to ensure it is up to date.
+    fn display_lines(&self) -> &[DisplayLine] {
+        &self.cached_display_lines
     }
 }
 
@@ -404,7 +423,7 @@ enum Action {
     Quit,
 }
 
-fn handle_key(key: &KeyEvent, app: &mut App, client_cfg: &AssistantConfig) -> Action {
+fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
     match (&key.key, key.modifiers) {
         // Exit: signal any running stream to stop.
         (KeyCode::Escape, _) | (KeyCode::Char('C'), Modifiers::CTRL) => {
@@ -414,7 +433,7 @@ fn handle_key(key: &KeyEvent, app: &mut App, client_cfg: &AssistantConfig) -> Ac
 
         // Submit
         (KeyCode::Enter, Modifiers::NONE) if !app.is_streaming => {
-            app.submit(client_cfg.clone());
+            app.submit();
             Action::Continue
         }
         (KeyCode::Enter, _) => Action::Continue,
@@ -521,7 +540,8 @@ pub fn ai_chat_overlay(
     };
 
     let model = client_cfg.model.clone();
-    let mut app = App::new(context, model, cols, rows);
+    let client = AiClient::new(client_cfg);
+    let mut app = App::new(context, model, cols, rows, client);
     let mut needs_redraw = true;
 
     // Welcome message: shown in UI only, not sent to the API.
@@ -531,6 +551,7 @@ pub fn ai_chat_overlay(
         complete: true,
         is_context: true,
     });
+    app.display_lines_dirty = true;
 
     loop {
         // Drain any streaming tokens first.
@@ -539,6 +560,7 @@ pub fn ai_chat_overlay(
         }
 
         if needs_redraw {
+            app.rebuild_display_cache();
             render(&mut term, &app)?;
             needs_redraw = false;
         }
@@ -553,7 +575,7 @@ pub fn ai_chat_overlay(
 
         match term.poll_input(timeout)? {
             Some(InputEvent::Key(key)) => {
-                match handle_key(&key, &mut app, &client_cfg) {
+                match handle_key(&key, &mut app) {
                     Action::Quit => break,
                     Action::Continue => {}
                 }
@@ -566,6 +588,7 @@ pub fn ai_chat_overlay(
             Some(InputEvent::Resized { cols, rows }) => {
                 app.cols = cols;
                 app.rows = rows;
+                app.display_lines_dirty = true;
                 needs_redraw = true;
             }
             Some(_) => {}

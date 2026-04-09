@@ -56,6 +56,9 @@ use wezterm_font::FontConfiguration;
 use wezterm_input_types::{is_ascii_control, IntegratedTitleButtonStyle, KeyboardLedStatus};
 
 static APP_TERMINATING: AtomicBool = AtomicBool::new(false);
+// Cached opacity state, updated on config change. Avoids a Mutex lock
+// on every compositor call to isOpaque (60-120Hz on ProMotion displays).
+static VIEW_IS_OPAQUE: AtomicBool = AtomicBool::new(true);
 
 #[allow(non_upper_case_globals)]
 const NSViewLayerContentsPlacementTopLeft: NSInteger = 11;
@@ -1743,11 +1746,9 @@ impl WindowInner {
     }
 
     fn update_window_shadow(&mut self) {
-        let is_opaque = if self.config.window_background_opacity >= 1.0 {
-            YES
-        } else {
-            NO
-        };
+        let opaque = self.config.window_background_opacity >= 1.0;
+        VIEW_IS_OPAQUE.store(opaque, Ordering::Relaxed);
+        let is_opaque = if opaque { YES } else { NO };
         unsafe {
             self.window.setOpaque_(is_opaque);
             // when transparent, also turn off the window shadow,
@@ -3733,8 +3734,10 @@ impl WindowView {
 
     // Tell macOS the view is opaque when window_background_opacity is 1.0
     // so the compositor can skip blending it with content behind it.
+    // Reads from a cached AtomicBool (updated on config change) to avoid
+    // acquiring the config Mutex on every compositor call (60-120Hz).
     extern "C" fn is_opaque(_this: &Object, _sel: Sel) -> BOOL {
-        if config::configuration().window_background_opacity >= 1.0 {
+        if VIEW_IS_OPAQUE.load(Ordering::Relaxed) {
             YES
         } else {
             NO

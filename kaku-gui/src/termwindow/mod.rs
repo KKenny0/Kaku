@@ -1022,6 +1022,9 @@ pub struct TermWindow {
 
     last_status_call: Instant,
     last_pane_output_invalidate: Option<Instant>,
+    /// True when an output invalidation was suppressed by the 8ms coalescing
+    /// window and a deferred follow-up has been scheduled.
+    pending_output_invalidate: bool,
     status_update_queued: bool,
     title_update_queued: bool,
     cursor_blink_state: RefCell<ColorEase>,
@@ -1584,6 +1587,7 @@ impl TermWindow {
             )),
             last_status_call: Instant::now(),
             last_pane_output_invalidate: None,
+            pending_output_invalidate: false,
             status_update_queued: false,
             title_update_queued: false,
             cursor_blink_state: RefCell::new(ColorEase::new(
@@ -2431,7 +2435,18 @@ impl TermWindow {
                     .unwrap_or(true);
                 if should_invalidate {
                     self.last_pane_output_invalidate = Some(now);
+                    self.pending_output_invalidate = false;
                     win.invalidate();
+                } else if !self.pending_output_invalidate {
+                    // First suppressed event in this coalesce window: schedule
+                    // a follow-up invalidate so the final output state is
+                    // always rendered even if no further events arrive.
+                    self.pending_output_invalidate = true;
+                    let win_clone = win.clone();
+                    promise::spawn::spawn_into_main_thread(async move {
+                        win_clone.invalidate();
+                    })
+                    .detach();
                 }
             }
         }

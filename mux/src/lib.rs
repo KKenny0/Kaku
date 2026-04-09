@@ -343,23 +343,26 @@ fn parse_buffered_data(
                     }
                 });
                 action_size += size;
-                // Force-flush if synchronized output hold has exceeded timeout.
-                // Prevents CLAUDE_CODE_NO_FLICKER and similar from blocking renders.
+                // Force-flush if synchronized output hold has exceeded timeout
+                // or accumulated data exceeds 1MB, whichever comes first.
                 if hold && !actions.is_empty() {
                     let timeout_ms = configuration().mux_synchronized_output_timeout_ms;
-                    if timeout_ms > 0 {
-                        if let Some(start) = hold_start {
-                            if start.elapsed() >= Duration::from_millis(timeout_ms) {
-                                send_actions_to_mux(
-                                    &pane,
-                                    pane_id,
-                                    &dead,
-                                    std::mem::take(&mut actions),
-                                );
-                                action_size = 0;
-                                hold_start = Some(Instant::now());
-                            }
-                        }
+                    let timed_out = timeout_ms > 0
+                        && hold_start
+                            .map(|s| s.elapsed() >= Duration::from_millis(timeout_ms))
+                            .unwrap_or(false);
+                    // 1MB cap guards against unbounded growth when timeout_ms == 0
+                    // or when a fast producer fills the buffer before the timeout fires.
+                    let size_exceeded = action_size > 1_048_576;
+                    if timed_out || size_exceeded {
+                        send_actions_to_mux(
+                            &pane,
+                            pane_id,
+                            &dead,
+                            std::mem::take(&mut actions),
+                        );
+                        action_size = 0;
+                        hold_start = Some(Instant::now());
                     }
                 }
                 if !actions.is_empty() && !hold {

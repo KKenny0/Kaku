@@ -521,10 +521,24 @@ pub fn start_tunnel(tunnel_url: String) {
     let tx_for_sub = tx.clone();
 
     if let Some(mux) = Mux::try_get() {
+        // Throttle tunnel captures to CAPTURE_INTERVAL (16ms) per pane,
+        // matching the local WebSocket path, to avoid capturing on every
+        // PaneOutput event under high-throughput output.
+        let tunnel_throttle: PaneThrottle = Arc::new(Mutex::new(HashMap::new()));
         mux.subscribe(move |notification| {
             if let MuxNotification::PaneOutput(pane_id) = notification {
                 let pid: usize = pane_id.into();
                 if tx_for_sub.receiver_count() > 0 {
+                    {
+                        let mut times = tunnel_throttle.lock();
+                        let now = Instant::now();
+                        if let Some(last) = times.get(&pid) {
+                            if now.duration_since(*last) < CAPTURE_INTERVAL {
+                                return true;
+                            }
+                        }
+                        times.insert(pid, now);
+                    }
                     if let Some(update) = capture_pane(pid) {
                         if let Err(e) = tx_for_sub.send(update) {
                             log::debug!("kaku-tunnel: failed to send update: {:?}", e);
