@@ -156,11 +156,7 @@ impl App {
         out.push(ApiMessage::system(sys));
 
         // Collect real (non-context) exchange pairs, then keep the last N.
-        let real: Vec<&Message> = self
-            .messages
-            .iter()
-            .filter(|m| !m.is_context)
-            .collect();
+        let real: Vec<&Message> = self.messages.iter().filter(|m| !m.is_context).collect();
         let skip = real.len().saturating_sub(MAX_HISTORY_PAIRS * 2);
         for msg in real.into_iter().skip(skip) {
             match msg.role {
