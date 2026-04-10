@@ -69,10 +69,11 @@ BODY="Debug build for testing. Commit: \`$SHORT_SHA\` ($TIMESTAMP)
 > Ad-hoc signed (debug build). macOS may require: System Settings → Privacy & Security → Open Anyway."
 
 if gh release view "$NIGHTLY_TAG" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-    log "Updating existing draft release '$NIGHTLY_TAG'..."
+    log "Updating existing nightly release '$NIGHTLY_TAG'..."
     gh release edit "$NIGHTLY_TAG" \
         -R "$GITHUB_REPO" \
-        --draft \
+        --prerelease \
+        --draft=false \
         --title "Nightly ($SHORT_SHA)" \
         --notes "$BODY"
     gh release upload "$NIGHTLY_TAG" \
@@ -80,11 +81,11 @@ if gh release view "$NIGHTLY_TAG" -R "$GITHUB_REPO" >/dev/null 2>&1; then
         "$ZIP_PATH" \
         --clobber
 else
-    log "Creating draft release '$NIGHTLY_TAG'..."
+    log "Creating nightly release '$NIGHTLY_TAG'..."
     gh release create "$NIGHTLY_TAG" \
         -R "$GITHUB_REPO" \
         "$ZIP_PATH" \
-        --draft \
+        --prerelease \
         --title "Nightly ($SHORT_SHA)" \
         --notes "$BODY"
 fi
