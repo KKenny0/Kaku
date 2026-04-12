@@ -6,8 +6,8 @@ use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::launcher::LauncherTabEntry;
 use crate::overlay::{
-    confirm_close_pane, confirm_close_tab, confirm_close_window, confirm_quit_program, launcher,
-    start_overlay, start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
+    confirm_close_pane, confirm_close_tab, confirm_quit_program, launcher, start_overlay,
+    start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
     QuickSelectOverlay,
 };
 use crate::resize_increment_calculator::ResizeIncrementCalculator;
@@ -1106,44 +1106,57 @@ impl TermWindow {
     }
 
     fn close_requested(&mut self, _window: &Window) {
-        let mux = Mux::get();
-        match self.config.window_close_confirmation {
-            WindowCloseConfirmation::NeverPrompt => {
-                mux.kill_window(self.mux_window_id);
-                _window.close();
-                front_end().forget_known_window(_window);
-            }
-            WindowCloseConfirmation::AlwaysPrompt => {
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
-                    Some(tab) => tab,
-                    None => {
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, hide the window instead of destroying it so that tabs,
+            // panes, and child processes are preserved. Clicking the Dock icon
+            // calls application_open_untitled_file which finds the window in
+            // conn.windows and focuses it back.
+            _window.order_out();
+            return;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mux = Mux::get();
+            match self.config.window_close_confirmation {
+                WindowCloseConfirmation::NeverPrompt => {
+                    mux.kill_window(self.mux_window_id);
+                    _window.close();
+                    front_end().forget_known_window(_window);
+                }
+                WindowCloseConfirmation::AlwaysPrompt => {
+                    let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                        Some(tab) => tab,
+                        None => {
+                            mux.kill_window(self.mux_window_id);
+                            _window.close();
+                            front_end().forget_known_window(_window);
+                            return;
+                        }
+                    };
+
+                    let mux_window_id = self.mux_window_id;
+
+                    let can_close = mux
+                        .get_window(mux_window_id)
+                        .map_or(false, |w| w.can_close_without_prompting());
+                    if can_close {
                         mux.kill_window(self.mux_window_id);
                         _window.close();
                         front_end().forget_known_window(_window);
                         return;
                     }
-                };
+                    let window = self.window.clone().unwrap();
+                    let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
+                        confirm_close_window(term, mux_window_id, window, tab_id)
+                    });
+                    self.assign_overlay(tab.tab_id(), overlay);
+                    promise::spawn::spawn(future).detach();
 
-                let mux_window_id = self.mux_window_id;
-
-                let can_close = mux
-                    .get_window(mux_window_id)
-                    .map_or(false, |w| w.can_close_without_prompting());
-                if can_close {
-                    mux.kill_window(self.mux_window_id);
-                    _window.close();
-                    front_end().forget_known_window(_window);
-                    return;
+                    // Don't close right now; let the close happen from
+                    // the confirmation overlay
                 }
-                let window = self.window.clone().unwrap();
-                let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
-                    confirm_close_window(term, mux_window_id, window, tab_id)
-                });
-                self.assign_overlay(tab.tab_id(), overlay);
-                promise::spawn::spawn(future).detach();
-
-                // Don't close right now; let the close happen from
-                // the confirmation overlay
             }
         }
     }

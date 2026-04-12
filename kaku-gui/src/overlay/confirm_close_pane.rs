@@ -52,7 +52,7 @@ pub fn confirm_close_tab(
     Ok(())
 }
 
-/// Shows a confirmation dialog before closing a window.
+#[cfg(not(target_os = "macos"))]
 pub fn confirm_close_window(
     mut term: TermWizTerminal,
     mux_window_id: WindowId,
