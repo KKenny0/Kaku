@@ -175,8 +175,72 @@ pub struct Mux {
 // This affects read buffer and socketpair kernel buffers.
 const BUFSIZE: usize = 256 * 1024;
 
-/// This function applies parsed actions to the pane and notifies any
-/// mux subscribers about the output event
+/// Minimum spacing between `PaneOutput` notifications from a single parse
+/// thread. When a pane is flooding output (e.g. `yes`), every parsed batch
+/// would otherwise hop through `spawn_into_main_thread` and saturate the
+/// runloop with repaint wakeups, starving key-event dispatch on sibling
+/// panes. Throttling to one notification per pane keeps the main thread
+/// responsive while still letting the 8ms paint coalescer downstream
+/// see a steady stream of updates.
+const PANE_OUTPUT_NOTIFY_THROTTLE: Duration = Duration::from_millis(8);
+
+/// Per-parse-thread throttle state for `PaneOutput` notifications.
+#[derive(Default)]
+struct PaneOutputNotifyState {
+    last_fire: Option<Instant>,
+    pending: bool,
+}
+
+impl PaneOutputNotifyState {
+    /// Fire a `PaneOutput` notification immediately if at least
+    /// `PANE_OUTPUT_NOTIFY_THROTTLE` has elapsed since the previous fire,
+    /// otherwise mark a deferred fire to be flushed later.
+    fn maybe_notify(&mut self, pane_id: PaneId) {
+        let now = Instant::now();
+        let should_fire = self
+            .last_fire
+            .map(|t| now.duration_since(t) >= PANE_OUTPUT_NOTIFY_THROTTLE)
+            .unwrap_or(true);
+        if should_fire {
+            self.last_fire = Some(now);
+            self.pending = false;
+            Mux::notify_from_any_thread(MuxNotification::PaneOutput(pane_id));
+        } else {
+            self.pending = true;
+        }
+    }
+
+    /// Flush any deferred notification unconditionally. Used on parse-loop
+    /// exit and at drain points so the final frame after a burst is never
+    /// lost.
+    fn flush(&mut self, pane_id: PaneId) {
+        if self.pending {
+            self.pending = false;
+            self.last_fire = Some(Instant::now());
+            Mux::notify_from_any_thread(MuxNotification::PaneOutput(pane_id));
+        }
+    }
+
+    /// Duration to wait before the next fire is due, or zero if fire is due
+    /// now. Used to shorten the parse-loop poll timeout while a deferred
+    /// notification is pending.
+    fn time_until_due(&self) -> Option<Duration> {
+        if !self.pending {
+            return None;
+        }
+        let last = self.last_fire?;
+        let elapsed = last.elapsed();
+        if elapsed >= PANE_OUTPUT_NOTIFY_THROTTLE {
+            Some(Duration::ZERO)
+        } else {
+            Some(PANE_OUTPUT_NOTIFY_THROTTLE - elapsed)
+        }
+    }
+}
+
+/// This function applies parsed actions to the pane. The caller is
+/// responsible for subsequently notifying mux subscribers via the
+/// throttled `PaneOutputNotifyState::maybe_notify` path.
 fn send_actions_to_mux(
     pane: &Weak<dyn Pane>,
     pane_id: PaneId,
@@ -188,7 +252,6 @@ fn send_actions_to_mux(
         Some(pane) => {
             pane.perform_actions(actions);
             histogram!("send_actions_to_mux.perform_actions.latency").record(start.elapsed());
-            Mux::notify_from_any_thread(MuxNotification::PaneOutput(pane.pane_id()));
         }
         None => {
             // Pane was removed from the mux. Before giving up, rescue any
@@ -247,6 +310,7 @@ fn parse_buffered_data(
     let mut action_size = 0;
     let mut delay = Duration::from_millis(configuration().mux_output_parser_coalesce_delay_ms);
     let mut deadline = None;
+    let mut notify_state = PaneOutputNotifyState::default();
 
     loop {
         // Check dead flag at the start of each iteration.
@@ -267,16 +331,27 @@ fn parse_buffered_data(
             break;
         }
 
-        // Use poll with 200ms timeout to balance CPU overhead and close responsiveness.
-        // POLLHUP will wake us immediately when writer closes.
+        // Use poll with 200ms timeout to balance CPU overhead and close
+        // responsiveness. When we owe a deferred PaneOutput notification,
+        // shorten the timeout so the final frame after a burst is flushed
+        // within the throttle window.
         let mut pfd = [pollfd {
             fd: rx.as_socket_descriptor(),
             events: POLLIN,
             revents: 0,
         }];
-        match poll(&mut pfd, Some(Duration::from_millis(200))) {
+        let base_timeout = Duration::from_millis(200);
+        // Clamp to 1 ms floor so a remaining of Duration::ZERO never puts
+        // poll into non-blocking mode and burns a tight spin iteration.
+        let poll_timeout = match notify_state.time_until_due() {
+            Some(remaining) => base_timeout.min(remaining.max(Duration::from_millis(1))),
+            None => base_timeout,
+        };
+        match poll(&mut pfd, Some(poll_timeout)) {
             Ok(0) => {
-                // Timeout, loop back to check dead flag
+                // Timeout, flush any deferred notify then loop back to
+                // check the dead flag.
+                notify_state.flush(pane_id);
                 continue;
             }
             Ok(_) if pfd[0].revents & POLLIN == 0 => {
@@ -318,6 +393,7 @@ fn parse_buffered_data(
                                     &dead,
                                     std::mem::take(&mut actions),
                                 );
+                                notify_state.maybe_notify(pane_id);
                                 action_size = 0;
                             }
                         }
@@ -339,6 +415,7 @@ fn parse_buffered_data(
 
                     if flush && !actions.is_empty() {
                         send_actions_to_mux(&pane, pane_id, &dead, std::mem::take(&mut actions));
+                        notify_state.maybe_notify(pane_id);
                         action_size = 0;
                     }
                 });
@@ -356,6 +433,7 @@ fn parse_buffered_data(
                     let size_exceeded = action_size > 1_048_576;
                     if timed_out || size_exceeded {
                         send_actions_to_mux(&pane, pane_id, &dead, std::mem::take(&mut actions));
+                        notify_state.maybe_notify(pane_id);
                         action_size = 0;
                         hold_start = Some(Instant::now());
                     }
@@ -391,6 +469,7 @@ fn parse_buffered_data(
                     }
 
                     send_actions_to_mux(&pane, pane_id, &dead, std::mem::take(&mut actions));
+                    notify_state.maybe_notify(pane_id);
                     deadline = None;
                     action_size = 0;
                 }
@@ -408,7 +487,11 @@ fn parse_buffered_data(
     // display what they displayed.
     if !actions.is_empty() {
         send_actions_to_mux(&pane, pane_id, &dead, std::mem::take(&mut actions));
+        notify_state.maybe_notify(pane_id);
     }
+    // Force any deferred notification to fire before we tear down, so the
+    // final rendered state is never stuck in a suppressed slot.
+    notify_state.flush(pane_id);
 }
 
 /// Non-blocking drain of any remaining data in the socketpair buffer.
@@ -444,6 +527,7 @@ fn drain_socketpair(
     }
     if !actions.is_empty() {
         send_actions_to_mux(pane, pane_id, dead, std::mem::take(actions));
+        Mux::notify_from_any_thread(MuxNotification::PaneOutput(pane_id));
     }
 }
 

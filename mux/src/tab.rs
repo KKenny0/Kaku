@@ -728,20 +728,45 @@ impl Tab {
         self.inner.lock().resize_split_by_visual(split_index, delta)
     }
 
+    /// Resize terminal state only without notifying PTYs.
+    /// Used during live window resize for smooth visual feedback.
+    /// Call `flush_pane_pty_sizes` once when the drag ends.
+    pub fn resize_visual(&self, size: TerminalSize) {
+        self.inner.lock().resize_visual(size)
+    }
+
     /// Notify the PTY of the current size for every pane.
     /// Called after a visual-only split drag completes so each shell
     /// receives exactly one SIGWINCH with the final size.
     pub fn flush_pane_pty_sizes(&self) {
-        for pos in self.iter_panes_ignoring_zoom() {
-            let dims = pos.pane.get_dimensions();
+        let inner = self.inner.lock();
+        if let Some(zoomed) = &inner.zoomed {
+            // When a pane is zoomed it occupies the full tab area. Use the
+            // tab's tracked size (updated by resize_visual) for SIGWINCH so
+            // the PTY gets the full-window dimensions, not the stale split
+            // tree geometry that iter_panes_ignoring_zoom would return.
+            let dims = zoomed.get_dimensions();
             let size = TerminalSize {
-                rows: pos.height,
-                cols: pos.width,
-                pixel_width: pos.pixel_width,
-                pixel_height: pos.pixel_height,
+                rows: inner.size.rows,
+                cols: inner.size.cols,
+                pixel_width: inner.size.pixel_width,
+                pixel_height: inner.size.pixel_height,
                 dpi: dims.dpi,
             };
-            let _ = pos.pane.resize(size);
+            let _ = zoomed.resize(size);
+        } else {
+            drop(inner);
+            for pos in self.iter_panes_ignoring_zoom() {
+                let dims = pos.pane.get_dimensions();
+                let size = TerminalSize {
+                    rows: pos.height,
+                    cols: pos.width,
+                    pixel_width: pos.pixel_width,
+                    pixel_height: pos.pixel_height,
+                    dpi: dims.dpi,
+                };
+                let _ = pos.pane.resize(size);
+            }
         }
     }
 
@@ -1390,6 +1415,52 @@ impl TabInner {
 
             // And then resize the individual panes to match
             apply_sizes_from_splits(self.pane.as_mut().unwrap(), &size);
+        }
+
+        Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));
+    }
+
+    fn resize_visual(&mut self, size: TerminalSize) {
+        if size.rows == 0 || size.cols == 0 {
+            return;
+        }
+
+        if self.zoomed.is_some() {
+            // Just track the new size. flush_pane_pty_sizes sends the single
+            // SIGWINCH for the zoomed pane when the animation ends.
+            self.size = size;
+        } else {
+            let dims = cell_dimensions(&size);
+            let (min_x, min_y) = compute_min_size(self.pane.as_mut().unwrap());
+            let current_size = self.size;
+
+            let cols = size.cols.max(min_x);
+            let rows = size.rows.max(min_y);
+            let size = TerminalSize {
+                rows,
+                cols,
+                pixel_width: cols * dims.pixel_width,
+                pixel_height: rows * dims.pixel_height,
+                dpi: dims.dpi,
+            };
+
+            adjust_x_size(
+                self.pane.as_mut().unwrap(),
+                cols as isize - current_size.cols as isize,
+                &dims,
+            );
+            adjust_y_size(
+                self.pane.as_mut().unwrap(),
+                rows as isize - current_size.rows as isize,
+                &dims,
+            );
+
+            self.size = size;
+            // Do not call apply_sizes_from_splits_visual here. During live
+            // window-resize animation this runs at ~60 fps; pushing resize_visual
+            // to every pane on every frame would hold the terminal lock and stall
+            // the parse thread. The split tree geometry is updated above;
+            // flush_pane_pty_sizes issues one resize per pane when animation ends.
         }
 
         Mux::try_get().map(|mux| mux.notify(MuxNotification::TabResized(self.id)));

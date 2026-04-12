@@ -815,6 +815,15 @@ pub struct Config {
     #[dynamic(default = "default_word_boundary")]
     pub selection_word_boundary: String,
 
+    /// When true, copying a selection that spans rows filled to the terminal
+    /// width will join those rows without a newline. This recovers single-line
+    /// commands that TUI apps (codex, cursor-cli, etc.) visually broke across
+    /// rows by filling each row to the right edge themselves.
+    /// Defaults to false to avoid silently removing newlines from legitimate
+    /// fixed-width content (tables, logs, records) that naturally end at column N.
+    #[dynamic(default)]
+    pub copy_unwrap_tui_lines: bool,
+
     #[dynamic(default = "default_enq_answerback")]
     pub enq_answerback: String,
 

@@ -1068,6 +1068,7 @@ pub struct TermWindow {
     /// Tracks whether we are currently in a live resize operation
     live_resizing: bool,
     pending_screen_change_resize: bool,
+    pending_pty_flush_after_resize: bool,
 
     gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
@@ -1640,6 +1641,7 @@ impl TermWindow {
             last_window_title: String::new(),
             live_resizing: false,
             pending_screen_change_resize: false,
+            pending_pty_flush_after_resize: false,
         };
 
         let tw = Rc::new(RefCell::new(myself));

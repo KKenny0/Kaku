@@ -356,7 +356,9 @@ impl FreeTypeRasterizer {
         // emoji glyphs don't always fill the bitmap size, so we compute
         // the non-transparent bounds
 
-        let mut cropped = crate::rasterizer::crop_to_non_transparent(&mut source_image).to_image();
+        let (crop_x, crop_y, sub) =
+            crate::rasterizer::crop_to_non_transparent(&mut source_image);
+        let mut cropped = sub.to_image();
         crate::rasterizer::swap_red_and_blue(&mut cropped);
 
         let dest_width = cropped.width() as usize;
@@ -366,12 +368,11 @@ impl FreeTypeRasterizer {
             data: cropped.into_vec(),
             height: dest_height,
             width: dest_width,
-            bearing_x: PixelLength::new(
-                f64::from(ft_glyph.bitmap_left) * (dest_width as f64 / width as f64),
-            ),
-            bearing_y: PixelLength::new(
-                f64::from(ft_glyph.bitmap_top) * (dest_height as f64 / height as f64),
-            ),
+            // After cropping transparent padding, adjust bearings by the crop origin.
+            // bearing_x: left edge moved right by crop_x columns.
+            // bearing_y: top edge moved down by crop_y rows (distance from baseline shrinks).
+            bearing_x: PixelLength::new(f64::from(ft_glyph.bitmap_left) + f64::from(crop_x)),
+            bearing_y: PixelLength::new(f64::from(ft_glyph.bitmap_top) - f64::from(crop_y)),
             has_color: self.has_color,
             is_scaled,
         })

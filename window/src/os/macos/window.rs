@@ -4594,8 +4594,11 @@ impl WindowView {
         if let Some(this) = Self::get_this(this) {
             this.native_fullscreen_transition_active.set(false);
             this.native_fullscreen_target.set(None);
+            // Transition is complete: mark as non-live so the landing resize
+            // calls tab.resize() (not resize_visual) and properly commits the
+            // terminal buffer to the final fullscreen dimensions.
             if let Ok(mut inner) = this.inner.try_borrow_mut() {
-                inner.live_resizing = true;
+                inner.live_resizing = false;
             }
         }
         Self::did_resize(this, _sel, _notification);
@@ -4646,8 +4649,11 @@ impl WindowView {
             this.native_fullscreen_transition_active.set(false);
             this.native_fullscreen_target.set(None);
             this.transition_hide_until.set(None);
+            // Transition is complete: mark as non-live so the landing resize
+            // calls tab.resize() (not resize_visual) and properly commits the
+            // terminal buffer to the final windowed dimensions.
             if let Ok(mut inner) = this.inner.try_borrow_mut() {
-                inner.live_resizing = true;
+                inner.live_resizing = false;
             }
         }
         Self::did_resize(this, _sel, _notification);

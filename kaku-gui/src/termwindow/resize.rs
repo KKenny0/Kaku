@@ -157,6 +157,7 @@ impl super::TermWindow {
             self.live_resizing = live_resizing;
 
             if was_live_resizing && !live_resizing {
+                self.flush_pending_pty_resize();
                 if self.pending_config_reload_after_resize {
                     self.pending_config_reload_after_resize = false;
                     self.schedule_silent_config_reload(window);
@@ -240,12 +241,26 @@ impl super::TermWindow {
             modal.reconfigure(self);
         }
         if !live_resizing {
+            self.flush_pending_pty_resize();
             if self.pending_config_reload_after_resize {
                 self.pending_config_reload_after_resize = false;
                 self.schedule_silent_config_reload(window);
             }
             self.emit_window_event("window-resized", None);
         }
+    }
+
+    fn flush_pending_pty_resize(&mut self) {
+        if !self.pending_pty_flush_after_resize {
+            return;
+        }
+        self.pending_pty_flush_after_resize = false;
+        let mux = Mux::get();
+        if let Some(window) = mux.get_window(self.mux_window_id) {
+            for tab in window.iter() {
+                tab.flush_pane_pty_sizes();
+            }
+        };
     }
 
     pub fn apply_pending_scale_changes(&mut self) {
@@ -522,12 +537,20 @@ impl super::TermWindow {
 
         self.terminal_size = size;
 
+        let live = self.live_resizing;
         let mux = Mux::get();
         if let Some(window) = mux.get_window(self.mux_window_id) {
             for tab in window.iter() {
-                tab.resize(size);
+                if live {
+                    tab.resize_visual(size);
+                } else {
+                    tab.resize(size);
+                }
             }
         };
+        if live {
+            self.pending_pty_flush_after_resize = true;
+        }
         self.resize_overlays();
         self.invalidate_fancy_tab_bar();
         self.update_title();

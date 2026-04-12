@@ -62,9 +62,13 @@ pub(crate) fn swap_red_and_blue<Container: std::ops::Deref<Target = [u8]> + std:
     }
 }
 
+/// Returns `(first_col, first_line, cropped_sub_image)` where `first_col` and
+/// `first_line` are the pixel offsets of the non-transparent bounding box
+/// within the original image. Callers use these offsets to adjust glyph
+/// bearings after the transparent padding has been trimmed.
 pub(crate) fn crop_to_non_transparent<'a, Container>(
     image: &'a mut image::ImageBuffer<Rgba<u8>, Container>,
-) -> image::SubImage<&'a mut ImageBuffer<Rgba<u8>, Container>>
+) -> (u32, u32, image::SubImage<&'a mut ImageBuffer<Rgba<u8>, Container>>)
 where
     Container: std::ops::Deref<Target = [u8]>,
 {
@@ -109,14 +113,16 @@ where
 
     let first_col = first_col.unwrap_or(0) as u32;
     let first_line = first_line.unwrap_or(0) as u32;
-    let last_col = last_col.unwrap_or(width as usize) as u32;
-    let last_line = last_line.unwrap_or(height as usize) as u32;
+    // +1: last_col/last_line are inclusive indices; crop width/height are exclusive.
+    let last_col = last_col.map(|c| c + 1).unwrap_or(width as usize) as u32;
+    let last_line = last_line.map(|l| l + 1).unwrap_or(height as usize) as u32;
 
-    image::imageops::crop(
+    let sub = image::imageops::crop(
         image,
         first_col,
         first_line,
         last_col - first_col,
         last_line - first_line,
-    )
+    );
+    (first_col, first_line, sub)
 }

@@ -25,6 +25,8 @@ impl super::TermWindow {
             let mut last_was_wrapped = false;
             let first_row = sel.rows().start;
             let last_row = sel.rows().end;
+            let term_cols = pane.get_dimensions().cols;
+            let unwrap_tui = self.config.copy_unwrap_tui_lines;
 
             for line in pane.get_logical_lines(sel.rows()) {
                 if result.is_empty() || !last_was_wrapped {
@@ -49,11 +51,25 @@ impl super::TermWindow {
                             .last_mut()
                             .map(|line| line.append_line(col_span, seqno));
 
-                        last_was_wrapped = last_col_idx == last_phys_idx
+                        // Layer A: use the per-line wrap attribute so partial-width
+                        // selections on a genuinely soft-wrapped row still suppress \n.
+                        last_was_wrapped = phys.last_cell_was_wrapped();
+
+                        // Layer B: heuristic for TUI self-wrapped full-width rows.
+                        // When the row is not marked as wrapped by the terminal but the
+                        // selection reached the rightmost column and the row fills the
+                        // terminal width, treat it as a visual continuation.
+                        if !last_was_wrapped
+                            && unwrap_tui
+                            && last_col_idx + 1 >= term_cols
                             && phys
-                                .get_cell(last_col_idx)
-                                .map(|c| c.attrs().wrapped())
-                                .unwrap_or(false);
+                                .visible_cells()
+                                .last()
+                                .map(|c| c.str() != " ")
+                                .unwrap_or(false)
+                        {
+                            last_was_wrapped = true;
+                        }
                     }
                 }
             }
@@ -75,6 +91,8 @@ impl super::TermWindow {
             let mut last_was_wrapped = false;
             let first_row = sel.rows().start;
             let last_row = sel.rows().end;
+            let term_cols = pane.get_dimensions().cols;
+            let unwrap_tui = self.config.copy_unwrap_tui_lines;
 
             for line in pane.get_logical_lines(sel.rows()) {
                 if !s.is_empty() && !last_was_wrapped {
@@ -96,11 +114,25 @@ impl super::TermWindow {
                             s.push_str(&col_span);
                         }
 
-                        last_was_wrapped = last_col_idx == last_phys_idx
+                        // Layer A: use the per-line wrap attribute so partial-width
+                        // selections on a genuinely soft-wrapped row still suppress \n.
+                        last_was_wrapped = phys.last_cell_was_wrapped();
+
+                        // Layer B: heuristic for TUI self-wrapped full-width rows.
+                        // When the row is not marked as wrapped by the terminal but the
+                        // selection reached the rightmost column and the row fills the
+                        // terminal width, treat it as a visual continuation.
+                        if !last_was_wrapped
+                            && unwrap_tui
+                            && last_col_idx + 1 >= term_cols
                             && phys
-                                .get_cell(last_col_idx)
-                                .map(|c| c.attrs().wrapped())
-                                .unwrap_or(false);
+                                .visible_cells()
+                                .last()
+                                .map(|c| c.str() != " ")
+                                .unwrap_or(false)
+                        {
+                            last_was_wrapped = true;
+                        }
                     }
                 }
             }
