@@ -269,9 +269,9 @@ enum ModelFetch {
 /// Maximum number of user+assistant exchange pairs to include in API context.
 const MAX_HISTORY_PAIRS: usize = 10;
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 /// Milliseconds between spinner frame advances.
-const SPINNER_INTERVAL_MS: u128 = 100;
+const SPINNER_INTERVAL_MS: u128 = 150;
 
 /// UI mode: normal chat or conversation picker.
 enum AppMode {
