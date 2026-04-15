@@ -2788,6 +2788,9 @@ struct WindowView {
     native_fullscreen_target: Cell<Option<bool>>,
     native_fullscreen_transition_start: Cell<Option<Instant>>,
     resize_retry_scheduled: Cell<bool>,
+    /// Set when window_will_close fires; prevents fullscreen transition
+    /// handlers from dispatching events to an already-destroyed window.
+    is_closing: Cell<bool>,
 }
 
 fn arm_display_change_opengl_present_defer(
@@ -3821,6 +3824,13 @@ impl WindowView {
     }
 
     extern "C" fn window_will_close(this: &mut Object, _sel: Sel, _id: id) {
+        // Mark the window as closing BEFORE any cleanup so that fullscreen
+        // transition handlers (will_exit_fullscreen, did_exit_fullscreen) that
+        // AppKit may fire during [NSWindow _close] will bail out instead of
+        // dispatching events into an already-destroyed TermWindow.
+        if let Some(view) = Self::get_this(this) {
+            view.is_closing.set(true);
+        }
         Self::cancel_pending_perform_requests(this as *mut Object);
         Self::detach_backing_layer(this);
         if let Some(this) = Self::get_this(this) {
@@ -4563,6 +4573,9 @@ impl WindowView {
 
     extern "C" fn will_enter_fullscreen(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             this.native_fullscreen_transition_active.set(true);
             this.native_fullscreen_target.set(Some(true));
             this.native_fullscreen_transition_start
@@ -4603,6 +4616,9 @@ impl WindowView {
 
     extern "C" fn did_enter_fullscreen(this: &mut Object, _sel: Sel, _notification: id) {
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             this.native_fullscreen_transition_active.set(false);
             this.native_fullscreen_target.set(None);
             // Transition is complete: mark as non-live so the landing resize
@@ -4614,6 +4630,9 @@ impl WindowView {
         }
         Self::did_resize(this, _sel, _notification);
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             this.native_fullscreen_transition_start.set(None);
             {
                 // Use try_borrow_mut: AppKit can fire this synchronously while
@@ -4635,6 +4654,9 @@ impl WindowView {
     extern "C" fn will_exit_fullscreen(this: &mut Object, _sel: Sel, _notification: id) {
         let view_id = this as *mut Object;
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             let now = Instant::now();
             this.native_fullscreen_transition_active.set(true);
             this.native_fullscreen_target.set(Some(false));
@@ -4678,6 +4700,9 @@ impl WindowView {
     extern "C" fn did_exit_fullscreen(this: &mut Object, _sel: Sel, _notification: id) {
         let view_id = this as *mut Object;
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             this.native_fullscreen_transition_active.set(false);
             this.native_fullscreen_target.set(None);
             this.transition_hide_until.set(None);
@@ -4690,6 +4715,9 @@ impl WindowView {
         }
         Self::did_resize(this, _sel, _notification);
         if let Some(this) = Self::get_this(this) {
+            if this.is_closing.get() {
+                return;
+            }
             this.native_fullscreen_transition_start.set(None);
             {
                 if let Ok(mut inner) = this.inner.try_borrow_mut() {
@@ -5185,6 +5213,7 @@ impl WindowView {
             native_fullscreen_target: Cell::new(None),
             native_fullscreen_transition_start: Cell::new(None),
             resize_retry_scheduled: Cell::new(false),
+            is_closing: Cell::new(false),
         }));
 
         unsafe {
