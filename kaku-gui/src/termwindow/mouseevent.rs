@@ -471,9 +471,9 @@ impl super::TermWindow {
                         if state.has_dragged {
                             self.start_tab_settle_animation(state.tab_idx, state.drag_offset_x);
                         }
+                        self.finish_mouse_release(*press);
+                        return;
                     }
-                    self.finish_mouse_release(*press);
-                    return;
                 }
             }
 
