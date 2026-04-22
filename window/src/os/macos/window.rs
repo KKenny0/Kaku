@@ -2991,15 +2991,24 @@ fn is_alnum_virtual_key(vkey: u16) -> bool {
     .contains(&vkey)
 }
 
-fn is_command_alnum_shortcut(modifiers: Modifiers, virtual_key: u16) -> bool {
+fn is_ascii_punctuation_text(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_punctuation())
+}
+
+fn is_command_alnum_shortcut(unmod: &str, modifiers: Modifiers, virtual_key: u16) -> bool {
     // Require Cmd (SUPER), disallow Alt/Ctrl (Shift is permitted).
     // Prevents Cmd+alnum shortcuts from failing when a non-Latin IME is active,
     // because macOS NSMenu keyEquivalent matching can return the wrong character.
+    // Some keyboard layouts (for example AZERTY) place punctuation on ANSI
+    // letter vkeys such as kVK_ANSI_M. If the unmodified text is punctuation,
+    // treat it as a symbol shortcut instead of forcing the alnum path.
     let must_have = Modifiers::SUPER;
     let must_not = Modifiers::ALT | Modifiers::CTRL | Modifiers::LEFT_ALT | Modifiers::RIGHT_ALT;
     modifiers.contains(must_have)
         && !modifiers.intersects(must_not)
         && is_alnum_virtual_key(virtual_key)
+        && !is_ascii_punctuation_text(unmod)
 }
 
 fn should_intercept_special_shortcut(chars: &str, modifiers: Modifiers, virtual_key: u16) -> bool {
@@ -3023,13 +3032,14 @@ fn should_intercept_special_shortcut(chars: &str, modifiers: Modifiers, virtual_
 
 fn should_intercept_perform_key_equivalent(
     chars: &str,
+    unmod: &str,
     modifiers: Modifiers,
     virtual_key: u16,
 ) -> bool {
     // Route these combinations through key_common so command shortcuts remain
     // stable even when NSMenu keyEquivalent matching is unreliable under IME.
     let special_shortcut = should_intercept_special_shortcut(chars, modifiers, virtual_key);
-    let command_alnum_shortcut = is_command_alnum_shortcut(modifiers, virtual_key);
+    let command_alnum_shortcut = is_command_alnum_shortcut(unmod, modifiers, virtual_key);
     let command_non_menu_key =
         modifiers.contains(Modifiers::SUPER) && is_non_menu_virtual_key(virtual_key);
 
@@ -3041,7 +3051,7 @@ fn should_clear_modifiers_for_empty_unmod(
     modifiers: Modifiers,
     virtual_key: u16,
 ) -> bool {
-    unmod.is_empty() && !is_command_alnum_shortcut(modifiers, virtual_key)
+    unmod.is_empty() && !is_command_alnum_shortcut(unmod, modifiers, virtual_key)
 }
 
 #[cfg(test)]
@@ -3157,25 +3167,43 @@ mod tests {
     #[test]
     fn command_alnum_shortcuts_are_stable_by_virtual_key() {
         // Cmd+letter
-        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_W));
-        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_K));
-        assert!(is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_1));
+        assert!(is_command_alnum_shortcut("w", Modifiers::SUPER, kVK_ANSI_W));
+        assert!(is_command_alnum_shortcut("k", Modifiers::SUPER, kVK_ANSI_K));
+        assert!(is_command_alnum_shortcut("1", Modifiers::SUPER, kVK_ANSI_1));
         // Cmd+Shift+letter (Shift is allowed)
         assert!(is_command_alnum_shortcut(
+            "D",
             Modifiers::SUPER | Modifiers::SHIFT,
             kVK_ANSI_D,
         ));
         assert!(is_command_alnum_shortcut(
+            "A",
             Modifiers::SUPER | Modifiers::SHIFT,
             kVK_ANSI_A,
         ));
         // Cmd+Alt+letter → false (Alt combos serve different purposes)
         assert!(!is_command_alnum_shortcut(
+            "w",
             Modifiers::SUPER | Modifiers::ALT | Modifiers::LEFT_ALT,
             kVK_ANSI_W,
         ));
         // Non-alnum key → false
-        assert!(!is_command_alnum_shortcut(Modifiers::SUPER, kVK_ANSI_Grave,));
+        assert!(!is_command_alnum_shortcut(
+            "`",
+            Modifiers::SUPER,
+            kVK_ANSI_Grave,
+        ));
+    }
+
+    #[test]
+    fn command_alnum_shortcut_ignores_layout_symbol_on_alnum_vkey() {
+        // Layouts like AZERTY can place "," on kVK_ANSI_M. Do not coerce
+        // this into Cmd+M alnum handling.
+        assert!(!is_command_alnum_shortcut(
+            ",",
+            Modifiers::SUPER,
+            kVK_ANSI_M
+        ));
     }
 
     #[test]
@@ -3183,15 +3211,18 @@ mod tests {
         // Core Cmd+alnum combinations should be intercepted.
         assert!(should_intercept_perform_key_equivalent(
             "w",
+            "w",
             Modifiers::SUPER,
             kVK_ANSI_W,
         ));
         assert!(should_intercept_perform_key_equivalent(
             "D",
+            "D",
             Modifiers::SUPER | Modifiers::SHIFT,
             kVK_ANSI_D,
         ));
         assert!(should_intercept_perform_key_equivalent(
+            "1",
             "1",
             Modifiers::SUPER,
             kVK_ANSI_1,
@@ -3200,10 +3231,12 @@ mod tests {
         // Cmd with extra modifiers (Alt/Ctrl) should not be treated as Cmd+alnum.
         assert!(!should_intercept_perform_key_equivalent(
             "w",
+            "w",
             Modifiers::SUPER | Modifiers::ALT | Modifiers::LEFT_ALT,
             kVK_ANSI_W,
         ));
         assert!(!should_intercept_perform_key_equivalent(
+            "w",
             "w",
             Modifiers::SUPER | Modifiers::CTRL,
             kVK_ANSI_W,
@@ -3212,8 +3245,18 @@ mod tests {
         // Preserve macOS window cycling on Cmd+`.
         assert!(!should_intercept_perform_key_equivalent(
             "`",
+            "`",
             Modifiers::SUPER,
             kVK_ANSI_Grave,
+        ));
+
+        // AZERTY-like punctuation on an alnum vkey should not be intercepted
+        // as Cmd+alnum, so the correct menu shortcut can run.
+        assert!(!should_intercept_perform_key_equivalent(
+            ",",
+            ",",
+            Modifiers::SUPER,
+            kVK_ANSI_M,
         ));
     }
 
@@ -4220,7 +4263,7 @@ impl WindowView {
                 // bindings can match stable base keys like "," across layouts/IME.
                 // Use exact match to avoid affecting Cmd+Ctrl+Shift+symbol etc.
                 (true, unmod)
-            } else if is_command_alnum_shortcut(modifiers, virtual_key) {
+            } else if is_command_alnum_shortcut(unmod, modifiers, virtual_key) {
                 (true, unmod)
             } else {
                 (false, unmod)
@@ -4556,18 +4599,20 @@ impl WindowView {
 
     extern "C" fn perform_key_equivalent(this: &mut Object, _sel: Sel, nsevent: id) -> BOOL {
         let chars = unsafe { nsstring_to_str(nsevent.characters()) };
+        let unmod = unsafe { nsstring_to_str(nsevent.charactersIgnoringModifiers()) };
         let modifier_flags = unsafe { nsevent.modifierFlags() };
         let modifiers = key_modifiers(modifier_flags);
         let virtual_key = unsafe { nsevent.keyCode() };
 
         log::trace!(
-            "perform_key_equivalent: chars=`{}` modifiers=`{:?}` virtual_key={:?}",
+            "perform_key_equivalent: chars=`{}` unmod=`{}` modifiers=`{:?}` virtual_key={:?}",
             chars.escape_debug(),
+            unmod.escape_debug(),
             modifiers,
             virtual_key,
         );
 
-        if should_intercept_perform_key_equivalent(chars, modifiers, virtual_key) {
+        if should_intercept_perform_key_equivalent(chars, unmod, modifiers, virtual_key) {
             // Synthesize a key down event for this, because macOS will
             // not do that, even though we tell it that we handled this event.
             // <https://github.com/wezterm/wezterm/issues/1867>

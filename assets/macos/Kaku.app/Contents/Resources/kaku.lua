@@ -3409,6 +3409,16 @@ local function build_managed_window_frame(scheme)
   frame.inactive_titlebar_bg = colors.inactive_titlebar_bg
   frame.active_titlebar_fg = colors.active_titlebar_fg
   frame.inactive_titlebar_fg = colors.inactive_titlebar_fg
+  frame.active_titlebar_border_bottom = colors.active_titlebar_border_bottom
+  frame.inactive_titlebar_border_bottom = colors.inactive_titlebar_border_bottom
+  frame.border_left_width = colors.border_left_width
+  frame.border_right_width = colors.border_right_width
+  frame.border_top_height = colors.border_top_height
+  frame.border_bottom_height = colors.border_bottom_height
+  frame.border_left_color = colors.border_left_color
+  frame.border_right_color = colors.border_right_color
+  frame.border_top_color = colors.border_top_color
+  frame.border_bottom_color = colors.border_bottom_color
   return frame
 end
 
@@ -3422,6 +3432,16 @@ local function window_frame_matches_theme(frame, scheme)
     and frame.inactive_titlebar_bg == colors.inactive_titlebar_bg
     and frame.active_titlebar_fg == colors.active_titlebar_fg
     and frame.inactive_titlebar_fg == colors.inactive_titlebar_fg
+    and frame.active_titlebar_border_bottom == colors.active_titlebar_border_bottom
+    and frame.inactive_titlebar_border_bottom == colors.inactive_titlebar_border_bottom
+    and frame.border_left_width == colors.border_left_width
+    and frame.border_right_width == colors.border_right_width
+    and frame.border_top_height == colors.border_top_height
+    and frame.border_bottom_height == colors.border_bottom_height
+    and frame.border_left_color == colors.border_left_color
+    and frame.border_right_color == colors.border_right_color
+    and frame.border_top_color == colors.border_top_color
+    and frame.border_bottom_color == colors.border_bottom_color
 end
 
 -- Dynamically switch font weight when theme changes
@@ -3740,10 +3760,20 @@ get_window_frame_colors = function(scheme)
   scheme = resolve_kaku_color_scheme(scheme)
   if scheme == 'Kaku Light' then
     return {
-      active_titlebar_bg = '#FFFCF0',
-      inactive_titlebar_bg = '#FFFCF0',
+      active_titlebar_bg = '#F6F1E3',
+      inactive_titlebar_bg = '#F1EBDD',
       active_titlebar_fg = '#100F0F',
       inactive_titlebar_fg = '#575653',
+      active_titlebar_border_bottom = '#D8CEB8',
+      inactive_titlebar_border_bottom = '#E3DAC8',
+      border_left_width = 1,
+      border_right_width = 1,
+      border_top_height = 1,
+      border_bottom_height = 1,
+      border_left_color = '#DDD3BF',
+      border_right_color = '#DDD3BF',
+      border_top_color = '#DDD3BF',
+      border_bottom_color = '#DDD3BF',
     }
   else
     return {
@@ -3751,6 +3781,16 @@ get_window_frame_colors = function(scheme)
       inactive_titlebar_bg = KAKU.BLACK,
       active_titlebar_fg = KAKU.WHITE,
       inactive_titlebar_fg = KAKU.GRAY,
+      active_titlebar_border_bottom = KAKU.BLACK,
+      inactive_titlebar_border_bottom = KAKU.BLACK,
+      border_left_width = 0,
+      border_right_width = 0,
+      border_top_height = 0,
+      border_bottom_height = 0,
+      border_left_color = nil,
+      border_right_color = nil,
+      border_top_color = nil,
+      border_bottom_color = nil,
     }
   end
 end
@@ -3764,6 +3804,16 @@ if not user_has_custom_window_frame then
     inactive_titlebar_bg = window_frame_colors.inactive_titlebar_bg,
     active_titlebar_fg = window_frame_colors.active_titlebar_fg,
     inactive_titlebar_fg = window_frame_colors.inactive_titlebar_fg,
+    active_titlebar_border_bottom = window_frame_colors.active_titlebar_border_bottom,
+    inactive_titlebar_border_bottom = window_frame_colors.inactive_titlebar_border_bottom,
+    border_left_width = window_frame_colors.border_left_width,
+    border_right_width = window_frame_colors.border_right_width,
+    border_top_height = window_frame_colors.border_top_height,
+    border_bottom_height = window_frame_colors.border_bottom_height,
+    border_left_color = window_frame_colors.border_left_color,
+    border_right_color = window_frame_colors.border_right_color,
+    border_top_color = window_frame_colors.border_top_color,
+    border_bottom_color = window_frame_colors.border_bottom_color,
   }
 end
 
