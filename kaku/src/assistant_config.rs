@@ -27,6 +27,8 @@ pub struct ProviderPreset {
     pub base_url: &'static str,
     /// Available model identifiers for this provider (empty = free-text).
     pub models: &'static [&'static str],
+    /// Auth mechanism: "api_key", "copilot", "codex", or "gemini_key".
+    pub auth_type: &'static str,
 }
 
 /// Built-in provider presets for the Kaku Assistant.
@@ -35,14 +37,28 @@ pub struct ProviderPreset {
 /// table via provider_preset() and detect_provider(). No other changes needed.
 pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
-        name: "OpenAI",
+        name: "Copilot",
+        base_url: "https://api.githubcopilot.com",
+        models: &["gpt-4.1", "gpt-4.5", "claude-sonnet-4-5", "o4-mini"],
+        auth_type: "copilot",
+    },
+    ProviderPreset {
+        name: "Codex",
         base_url: "https://api.openai.com/v1",
-        models: &[],
+        models: &["codex-mini-latest", "o4-mini", "o3"],
+        auth_type: "codex",
+    },
+    ProviderPreset {
+        name: "Gemini",
+        base_url: "https://generativelanguage.googleapis.com",
+        models: &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+        auth_type: "gemini_key",
     },
     ProviderPreset {
         name: "Custom",
         base_url: "",
         models: &[],
+        auth_type: "api_key",
     },
 ];
 
@@ -64,11 +80,23 @@ pub fn provider_names() -> Vec<String> {
 /// Returns the matching preset name if the base URL matches a known provider,
 /// or `"Custom"` otherwise.
 pub fn detect_provider(base_url: &str) -> &'static str {
+    detect_provider_with_auth(base_url, "api_key")
+}
+
+/// Detects the provider name from a base URL and stored auth_type.
+///
+/// Codex shares the OpenAI base URL (`https://api.openai.com/v1`);
+/// pass `auth_type = "codex"` to get "Codex" back instead of "Custom".
+pub fn detect_provider_with_auth(base_url: &str, auth_type: &str) -> &'static str {
     let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
     for preset in PROVIDER_PRESETS {
-        if !preset.base_url.is_empty()
-            && normalized == preset.base_url.trim_end_matches('/').to_ascii_lowercase()
-        {
+        if preset.base_url.is_empty() {
+            continue;
+        }
+        if normalized != preset.base_url.trim_end_matches('/').to_ascii_lowercase() {
+            continue;
+        }
+        if preset.auth_type == auth_type {
             return preset.name;
         }
     }
@@ -359,9 +387,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_provider_matches_known_urls() {
-        assert_eq!(detect_provider("https://api.openai.com/v1"), "OpenAI");
-        assert_eq!(detect_provider("https://api.openai.com/v1/"), "OpenAI");
+    fn detect_provider_returns_custom_for_openai_url() {
+        assert_eq!(detect_provider("https://api.openai.com/v1"), "Custom");
+        assert_eq!(detect_provider("https://api.openai.com/v1/"), "Custom");
     }
 
     #[test]
@@ -371,22 +399,39 @@ mod tests {
     }
 
     #[test]
-    fn provider_preset_lookup_returns_correct_preset() {
-        let preset = provider_preset("OpenAI").expect("OpenAI preset");
-        assert_eq!(preset.base_url, "https://api.openai.com/v1");
-        assert!(preset.models.is_empty());
-    }
-
-    #[test]
     fn provider_preset_lookup_returns_none_for_unknown() {
         assert!(provider_preset("UnknownProvider").is_none());
+        assert!(provider_preset("OpenAI").is_none());
     }
 
     #[test]
     fn provider_names_includes_all_presets() {
         let names = provider_names();
-        assert!(names.contains(&"OpenAI".to_string()));
+        assert!(!names.contains(&"OpenAI".to_string()));
+        assert!(names.contains(&"Copilot".to_string()));
+        assert!(names.contains(&"Codex".to_string()));
+        assert!(names.contains(&"Gemini".to_string()));
         assert!(names.contains(&"Custom".to_string()));
+    }
+
+    #[test]
+    fn detect_provider_with_auth_distinguishes_codex() {
+        assert_eq!(
+            detect_provider_with_auth("https://api.openai.com/v1", "codex"),
+            "Codex"
+        );
+        assert_eq!(
+            detect_provider_with_auth("https://api.openai.com/v1", "api_key"),
+            "Custom"
+        );
+        assert_eq!(
+            detect_provider_with_auth("https://api.githubcopilot.com", "copilot"),
+            "Copilot"
+        );
+        assert_eq!(
+            detect_provider_with_auth("https://generativelanguage.googleapis.com", "gemini_key"),
+            "Gemini"
+        );
     }
 
     #[test]

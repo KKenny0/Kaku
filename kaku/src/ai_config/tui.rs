@@ -113,6 +113,10 @@ const UI_STATUS_TTL: Duration = Duration::from_secs(3);
 const UI_ERROR_TTL: Duration = Duration::from_secs(5);
 const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+// GitHub OAuth client for Copilot device-code flow (VS Code's registered client ID).
+const COPILOT_GITHUB_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+const COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
+const COPILOT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const KIMI_OAUTH_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const KIMI_OAUTH_TOKEN_URL: &str = "https://auth.kimi.com/api/oauth/token";
 const KIMI_DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
@@ -372,8 +376,11 @@ fn summarize_tool_fields(
 
     if tool == Tool::KakuAssistant {
         let model = field_value(fields, "Model").and_then(compact_summary_value)?;
+        // OAuth providers show an auth status field instead of API Key.
+        let is_oauth_ready = field_value(fields, "GitHub Auth").is_some_and(|v| v.starts_with('✓'))
+            || field_value(fields, "Codex Auth").is_some_and(|v| v.starts_with('✓'));
         let has_api_key = field_value(fields, "API Key").is_some_and(|value| value != "—");
-        if has_api_key {
+        if has_api_key || is_oauth_ready {
             return Some(format!("Ready · {model}"));
         }
         return Some(format!("Setup required · {model}"));
@@ -2628,8 +2635,10 @@ struct KakuAssistantConfig {
     model: String,
     /// Base URL for the API endpoint (never empty, falls back to default)
     base_url: String,
-    /// Provider preset name (e.g. "OpenAI", "Custom")
+    /// Provider preset name (e.g. "OpenAI", "Copilot", "Custom")
     provider: String,
+    /// Auth mechanism: "api_key", "copilot", "codex", or "gemini_key".
+    auth_type: String,
     /// Optional extra request headers as `Name: Value`
     custom_headers: Vec<String>,
     /// Web search backend: "none" (disabled), "brave", "pipellm", or "tavily".
@@ -2660,6 +2669,9 @@ impl KakuAssistantConfig {
             base_url
         };
         let provider = assistant_config::detect_provider(&resolved_base_url).to_string();
+        let auth_type = assistant_config::provider_preset(&provider)
+            .map(|p| p.auth_type.to_string())
+            .unwrap_or_else(|| "api_key".to_string());
         Self {
             enabled,
             api_key: api_key.into(),
@@ -2670,6 +2682,7 @@ impl KakuAssistantConfig {
             },
             base_url: resolved_base_url,
             provider,
+            auth_type,
             custom_headers: vec![],
             web_search_provider: "none".to_string(),
             web_search_api_key: String::new(),
@@ -2705,8 +2718,17 @@ impl KakuAssistantConfig {
         &self.provider
     }
 
+    fn auth_type(&self) -> &str {
+        &self.auth_type
+    }
+
     fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = provider.into();
+        self
+    }
+
+    fn with_auth_type(mut self, auth_type: impl Into<String>) -> Self {
+        self.auth_type = auth_type.into();
         self
     }
 
@@ -2756,6 +2778,10 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
         .get("base_url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let stored_auth_type = parsed
+        .get("auth_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("api_key");
     let custom_headers = parse_custom_headers_toml(parsed.get("custom_headers"));
 
     let web_search_provider = parsed
@@ -2771,7 +2797,22 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
         .unwrap_or("")
         .to_string();
 
+    // Derive provider using both base_url and auth_type so Codex (same base_url as
+    // OpenAI) is correctly identified.
+    let resolved_base_url = if base_url.trim().is_empty() {
+        assistant_config::DEFAULT_BASE_URL
+    } else {
+        base_url
+    };
+    let provider_name =
+        assistant_config::detect_provider_with_auth(resolved_base_url, stored_auth_type);
+    let auth_type = assistant_config::provider_preset(provider_name)
+        .map(|p| p.auth_type)
+        .unwrap_or("api_key");
+
     KakuAssistantConfig::new(enabled, api_key, model, base_url)
+        .with_provider(provider_name)
+        .with_auth_type(auth_type)
         .with_custom_headers(custom_headers)
         .with_web_search(web_search_provider, web_search_api_key)
 }
@@ -2935,8 +2976,15 @@ fn fetch_kaku_assistant_models(api_key: &str, base_url: &str) -> Vec<String> {
 fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
     let cfg = parse_kaku_assistant_config(raw);
 
-    // Fetch live model list from the API; falls back to empty (free-text) on failure.
-    let model_options = fetch_kaku_assistant_models(cfg.api_key(), cfg.base_url());
+    // For OAuth providers, skip the live model fetch (no api_key available).
+    let model_options = if cfg.auth_type() == "api_key" || cfg.auth_type() == "gemini_key" {
+        fetch_kaku_assistant_models(cfg.api_key(), cfg.base_url())
+    } else {
+        // Use the preset model list for OAuth providers.
+        assistant_config::provider_preset(cfg.provider())
+            .map(|p| p.models.iter().map(|m| m.to_string()).collect())
+            .unwrap_or_default()
+    };
 
     let mut fields = vec![
         FieldEntry {
@@ -2948,7 +2996,15 @@ fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
         FieldEntry {
             key: "Provider".into(),
             value: cfg.provider().to_string(),
-            options: assistant_config::provider_names(),
+            options: {
+                let mut opts = available_provider_names();
+                // Always keep the currently selected provider in the list.
+                let current = cfg.provider();
+                if !opts.iter().any(|o| o == current) {
+                    opts.insert(0, current.to_string());
+                }
+                opts
+            },
             editable: true,
         },
         FieldEntry {
@@ -2963,24 +3019,57 @@ fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
             options: vec![],
             editable: true,
         },
-        FieldEntry {
-            key: "API Key".into(),
-            value: mask_key(cfg.api_key()),
-            options: vec![],
-            editable: true,
-        },
-        FieldEntry {
-            key: "Web Search".into(),
-            value: cfg.web_search_provider().to_string(),
-            options: vec![
-                "none".into(),
-                "brave".into(),
-                "pipellm".into(),
-                "tavily".into(),
-            ],
-            editable: true,
-        },
     ];
+
+    match cfg.auth_type() {
+        "copilot" => {
+            let status = if copilot_auth_status() {
+                "✓ Logged in via GitHub".to_string()
+            } else {
+                "✗ Not logged in — press Enter to authenticate".to_string()
+            };
+            fields.push(FieldEntry {
+                key: "GitHub Auth".into(),
+                value: status,
+                options: vec![],
+                editable: false,
+            });
+        }
+        "codex" => {
+            let status = if codex_auth_status() {
+                "✓ Logged in (Codex CLI)".to_string()
+            } else {
+                "✗ Not logged in — run `codex auth login`".to_string()
+            };
+            fields.push(FieldEntry {
+                key: "Codex Auth".into(),
+                value: status,
+                options: vec![],
+                editable: false,
+            });
+        }
+        _ => {
+            // "api_key" or "gemini_key"
+            fields.push(FieldEntry {
+                key: "API Key".into(),
+                value: mask_key(cfg.api_key()),
+                options: vec![],
+                editable: true,
+            });
+        }
+    }
+
+    fields.push(FieldEntry {
+        key: "Web Search".into(),
+        value: cfg.web_search_provider().to_string(),
+        options: vec![
+            "none".into(),
+            "brave".into(),
+            "pipellm".into(),
+            "tavily".into(),
+        ],
+        editable: true,
+    });
 
     // Show Search Key entry only when a provider is selected.
     if cfg.web_search_provider() != "none" {
@@ -2993,6 +3082,44 @@ fn extract_kaku_assistant_fields(raw: &str) -> Vec<FieldEntry> {
     }
 
     fields
+}
+
+/// Returns true when copilot_auth.json exists and has a GitHub token.
+fn copilot_auth_status() -> bool {
+    let home = config::HOME_DIR.clone();
+    let path = home.join(".config").join("kaku").join("copilot_auth.json");
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            return v
+                .get("github_token")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.trim().is_empty());
+        }
+    }
+    false
+}
+
+/// Returns true when ~/.codex/auth.json exists and has an access token.
+fn codex_auth_status() -> bool {
+    let auth_path = config::HOME_DIR.join(".codex").join("auth.json");
+    if let Ok(raw) = std::fs::read_to_string(&auth_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let token = v
+                .get("tokens")
+                .and_then(|t| t.get("access_token"))
+                .or_else(|| v.get("access_token"))
+                .and_then(|t| t.as_str());
+            return token.is_some_and(|t| !t.is_empty());
+        }
+    }
+    false
+}
+
+/// Returns provider names available in the assistant provider selector.
+/// Providers remain visible even before authentication so users can select
+/// one and complete the corresponding login/config flow from the same screen.
+fn available_provider_names() -> Vec<String> {
+    assistant_config::provider_names()
 }
 
 fn render_toml_string(value: &str) -> String {
@@ -3018,7 +3145,9 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
     } else {
         "enabled = false\n"
     });
-    if cfg.api_key().trim().is_empty() {
+    // OAuth providers do not use api_key; keep it commented out to avoid confusion.
+    let is_oauth = matches!(cfg.auth_type(), "copilot" | "codex");
+    if is_oauth || cfg.api_key().trim().is_empty() {
         out.push_str("# api_key = \"<your_api_key>\"\n");
     } else {
         out.push_str(&format!(
@@ -3034,6 +3163,14 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
         "base_url = {}\n",
         render_toml_string(cfg.base_url().trim())
     ));
+    // Persist auth_type only when it differs from "api_key" so the Codex provider
+    // (same base_url as OpenAI) can be reliably identified on next load.
+    if cfg.auth_type() != "api_key" {
+        out.push_str(&format!(
+            "auth_type = {}\n",
+            render_toml_string(cfg.auth_type())
+        ));
+    }
     if cfg.custom_headers().is_empty() {
         out.push_str("# custom_headers = [\"X-Customer-ID: your-customer-id\"]\n");
     } else {
@@ -3110,7 +3247,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                 .with_web_search(cfg.web_search_provider(), cfg.web_search_api_key())
         }
         "Provider" => {
-            // When provider changes, auto-fill base_url and default model.
+            // When provider changes, auto-fill base_url, default model, and auth_type.
             let provider_name = new_val.trim();
             if let Some(preset) = assistant_config::provider_preset(provider_name) {
                 let new_base_url = if preset.base_url.is_empty() {
@@ -3125,6 +3262,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
                     .unwrap_or_else(|| cfg.model());
                 KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), new_model, new_base_url)
                     .with_provider(provider_name)
+                    .with_auth_type(preset.auth_type)
                     .with_custom_headers(cfg.custom_headers().to_vec())
                     .with_web_search(cfg.web_search_provider(), cfg.web_search_api_key())
             } else {
@@ -3139,6 +3277,7 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), model, cfg.base_url())
                 .with_provider(cfg.provider())
+                .with_auth_type(cfg.auth_type())
                 .with_custom_headers(cfg.custom_headers().to_vec())
                 .with_web_search(cfg.web_search_provider(), cfg.web_search_api_key())
         }
@@ -3148,8 +3287,10 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             } else {
                 new_val.trim()
             };
+            let provider = assistant_config::detect_provider_with_auth(base_url, cfg.auth_type());
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), base_url)
-                .with_provider(assistant_config::detect_provider(base_url))
+                .with_provider(provider)
+                .with_auth_type(cfg.auth_type())
                 .with_custom_headers(cfg.custom_headers().to_vec())
                 .with_web_search(cfg.web_search_provider(), cfg.web_search_api_key())
         }
@@ -3160,8 +3301,14 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             cfg.base_url(),
         )
         .with_provider(cfg.provider())
+        .with_auth_type(cfg.auth_type())
         .with_custom_headers(cfg.custom_headers().to_vec())
         .with_web_search(cfg.web_search_provider(), cfg.web_search_api_key()),
+        "GitHub Auth" | "Codex Auth" => {
+            // These are read-only status fields; saves are handled via OAuth flow,
+            // not through the standard field-save mechanism.
+            return Ok(());
+        }
         "Web Search" => {
             const VALID: &[&str] = &["none", "brave", "pipellm", "tavily"];
             let provider = if VALID.contains(&new_val.trim()) {
@@ -3177,12 +3324,14 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
             };
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), cfg.base_url())
                 .with_provider(cfg.provider())
+                .with_auth_type(cfg.auth_type())
                 .with_custom_headers(cfg.custom_headers().to_vec())
                 .with_web_search(provider, key)
         }
         "Search Key" => {
             KakuAssistantConfig::new(cfg.is_enabled(), cfg.api_key(), cfg.model(), cfg.base_url())
                 .with_provider(cfg.provider())
+                .with_auth_type(cfg.auth_type())
                 .with_custom_headers(cfg.custom_headers().to_vec())
                 .with_web_search(cfg.web_search_provider(), new_val.trim())
         }
@@ -3190,6 +3339,150 @@ fn save_kaku_assistant_field(field_key: &str, new_val: &str) -> anyhow::Result<(
     };
 
     write_kaku_assistant_config(&path, &updated)
+}
+
+// ─── Copilot OAuth device-code flow ──────────────────────────────────────────
+
+/// Step 1: POST to GitHub to obtain a device code and user code.
+///
+/// Returns `(user_code, device_code, verification_uri, interval_secs)`.
+fn copilot_start_device_flow() -> anyhow::Result<(String, String, String, u64)> {
+    let result = run_curl(&[
+        "-sS",
+        "--max-time",
+        "10",
+        "-X",
+        "POST",
+        COPILOT_DEVICE_CODE_URL,
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "Content-Type: application/x-www-form-urlencoded",
+        "--data-urlencode",
+        &format!("client_id={COPILOT_GITHUB_CLIENT_ID}"),
+        "--data-urlencode",
+        "scope=read:user",
+    ])
+    .ok_or_else(|| anyhow::anyhow!("Failed to start device flow (network error?)"))?;
+
+    let user_code = result["user_code"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing user_code in device flow response"))?
+        .to_string();
+    let device_code = result["device_code"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing device_code in device flow response"))?
+        .to_string();
+    let verification_uri = result["verification_uri"]
+        .as_str()
+        .unwrap_or("https://github.com/login/device")
+        .to_string();
+    let interval = result["interval"].as_u64().unwrap_or(5);
+    Ok((user_code, device_code, verification_uri, interval))
+}
+
+/// Step 2: Poll GitHub until the user completes authorization.
+///
+/// Returns the GitHub access token on success.
+fn copilot_poll_for_github_token(device_code: &str, interval_secs: u64) -> anyhow::Result<String> {
+    let max_polls = 36; // ~3 minutes at 5-second intervals
+    let sleep_duration = std::time::Duration::from_secs(interval_secs.max(5));
+
+    for _ in 0..max_polls {
+        std::thread::sleep(sleep_duration);
+
+        let result = run_curl(&[
+            "-sS",
+            "--max-time",
+            "10",
+            "-X",
+            "POST",
+            COPILOT_ACCESS_TOKEN_URL,
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "Content-Type: application/x-www-form-urlencoded",
+            "--data-urlencode",
+            &format!("client_id={COPILOT_GITHUB_CLIENT_ID}"),
+            "--data-urlencode",
+            &format!("device_code={device_code}"),
+            "--data-urlencode",
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code",
+        ]);
+
+        if let Some(data) = result {
+            if let Some(error) = data.get("error").and_then(|e| e.as_str()) {
+                match error {
+                    "authorization_pending" | "slow_down" => {
+                        print!(".");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        continue;
+                    }
+                    "expired_token" => {
+                        anyhow::bail!("Authorization timed out. Please try again.");
+                    }
+                    other => anyhow::bail!("Authorization failed: {other}"),
+                }
+            }
+            if let Some(token) = data.get("access_token").and_then(|t| t.as_str()) {
+                if !token.is_empty() {
+                    return Ok(token.to_string());
+                }
+            }
+        }
+    }
+    anyhow::bail!("Authorization timed out after 3 minutes.")
+}
+
+/// Save the GitHub token to ~/.config/kaku/copilot_auth.json.
+fn copilot_save_github_token(github_token: &str) -> anyhow::Result<()> {
+    let path = config::HOME_DIR
+        .join(".config")
+        .join("kaku")
+        .join("copilot_auth.json");
+
+    if let Some(parent) = path.parent() {
+        config::create_user_owned_dirs(parent).ok();
+    }
+
+    let auth = serde_json::json!({
+        "github_token": github_token,
+        "copilot_token": "",
+        "copilot_expires_at": 0
+    });
+    let bytes = serde_json::to_vec_pretty(&auth).unwrap_or_default();
+    std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Interactive Copilot OAuth flow: runs with the terminal unsuspended so the
+/// user can see the auth URL and code. Call via `with_terminal_suspended`.
+pub fn run_copilot_oauth_flow() -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+
+    println!("\nConnecting to GitHub...");
+    let (user_code, device_code, verification_uri, interval) = copilot_start_device_flow()?;
+
+    println!();
+    println!("  Visit:  {verification_uri}");
+    println!("  Code:   {user_code}");
+    println!();
+
+    // Try to open the browser on macOS.
+    let _ = std::process::Command::new("open")
+        .arg(&verification_uri)
+        .spawn();
+
+    print!("Waiting for authorization");
+    let _ = stdout.flush();
+
+    let github_token = copilot_poll_for_github_token(&device_code, interval)?;
+    copilot_save_github_token(&github_token)?;
+
+    println!("\nAuthentication successful.");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    Ok(())
 }
 
 /// Get Gemini account email from google_accounts.json
@@ -4173,6 +4466,9 @@ struct App {
     last_error: Option<String>,
     error_expire: Option<Instant>,
     should_quit: bool,
+    /// Set to true when the user activates the "GitHub Auth" field for Copilot.
+    /// The run_loop checks this flag and runs the OAuth flow via with_terminal_suspended.
+    pending_copilot_login: bool,
 }
 
 fn status_value_for_display(field_key: &str, new_val: &str) -> String {
@@ -4207,6 +4503,7 @@ impl App {
             last_error: None,
             error_expire: None,
             should_quit: false,
+            pending_copilot_login: false,
         };
         app.restart_usage_loading();
         let _ = app.sync_transient_errors();
@@ -4606,6 +4903,13 @@ impl App {
         if tool.tool == Tool::Antigravity && field.key == "Model" {
             self.set_toast("Change the model in Antigravity settings.");
             self.open_antigravity_app();
+            return;
+        }
+
+        // Copilot login: mark a pending login so run_loop can run the OAuth flow
+        // inside with_terminal_suspended (which needs access to the terminal handle).
+        if tool.tool == Tool::KakuAssistant && field.key == "GitHub Auth" {
+            self.pending_copilot_login = true;
             return;
         }
 
@@ -5400,7 +5704,21 @@ fn run_loop(
                     }
                     KeyCode::Up | KeyCode::Char('k') => app.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-                    code if is_confirm_key(code) => app.start_edit(),
+                    code if is_confirm_key(code) => {
+                        app.start_edit();
+                        if app.pending_copilot_login {
+                            app.pending_copilot_login = false;
+                            match with_terminal_suspended(terminal, run_copilot_oauth_flow) {
+                                Ok(()) => {
+                                    app.set_status("GitHub authentication successful");
+                                    app.reload_current_tool();
+                                }
+                                Err(e) => {
+                                    app.set_error(format!("Copilot login failed: {e}"));
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Char('o') => {
                         if let Some(path) = app.config_path_to_open() {
                             match with_terminal_suspended(terminal, || open_path_in_editor(&path)) {
@@ -6274,6 +6592,7 @@ mod tests {
             last_error: None,
             error_expire: None,
             should_quit: false,
+            pending_copilot_login: false,
         };
 
         app.start_edit();
@@ -6540,8 +6859,8 @@ provider = "managed:kimi-code"
             .iter()
             .find(|f| f.key == "Provider")
             .expect("Provider field");
-        assert_eq!(provider.value, "OpenAI");
-        assert!(provider.options.contains(&"OpenAI".to_string()));
+        assert_eq!(provider.value, "Custom");
+        assert!(!provider.options.contains(&"OpenAI".to_string()));
         assert!(provider.options.contains(&"Custom".to_string()));
 
         let model = fields
@@ -6560,17 +6879,17 @@ provider = "managed:kimi-code"
             .iter()
             .find(|f| f.key == "Provider")
             .expect("Provider field");
-        assert_eq!(provider.value, "OpenAI");
+        assert_eq!(provider.value, "Custom");
     }
 
     #[test]
-    fn kaku_assistant_provider_defaults_to_openai() {
+    fn kaku_assistant_provider_defaults_to_custom() {
         let fields = extract_kaku_assistant_fields("enabled = true\n");
         let provider = fields
             .iter()
             .find(|f| f.key == "Provider")
             .expect("Provider field");
-        assert_eq!(provider.value, "OpenAI");
+        assert_eq!(provider.value, "Custom");
     }
 
     #[test]
@@ -6626,7 +6945,7 @@ provider = "managed:kimi-code"
     fn kaku_assistant_provider_round_trip_preserves_headers() {
         let raw = "enabled = true\napi_key = \"sk-test\"\nmodel = \"gpt-5.4-mini\"\nbase_url = \"https://api.openai.com/v1\"\ncustom_headers = [\"X-Foo: bar\"]\n";
         let cfg = parse_kaku_assistant_config(raw);
-        assert_eq!(cfg.provider(), "OpenAI");
+        assert_eq!(cfg.provider(), "Custom");
         assert_eq!(cfg.custom_headers(), &["X-Foo: bar"]);
 
         let dir = tempdir().expect("tempdir");
