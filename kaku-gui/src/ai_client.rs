@@ -318,16 +318,12 @@ impl AiClient {
     fn list_gemini_models(&self) -> Result<Vec<String>> {
         let api_key = &self.config.api_key;
         let base = self.config.base_url.trim_end_matches('/');
-        let url = if api_key.is_empty() {
-            format!("{base}/v1beta/models")
-        } else {
-            format!("{base}/v1beta/models?key={api_key}")
-        };
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .context("GET Gemini /models failed")?;
+        let url = format!("{base}/v1beta/models");
+        let mut req = self.client.get(&url);
+        if !api_key.is_empty() {
+            req = req.header("x-goog-api-key", api_key);
+        }
+        let resp = req.send().context("GET Gemini /models failed")?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
@@ -539,14 +535,18 @@ impl AiClient {
         };
 
         let body = ai_gemini::openai_messages_to_gemini(&raw_messages, effective_tools);
-        let url = ai_gemini::gemini_stream_url(&self.config.base_url, model, &self.config.api_key);
+        let url = ai_gemini::gemini_stream_url(&self.config.base_url, model);
 
-        let response = self
+        let mut req = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("Accept-Encoding", "identity")
+            .header("Accept-Encoding", "identity");
+        if !self.config.api_key.is_empty() {
+            req = req.header("x-goog-api-key", &self.config.api_key);
+        }
+        let response = req
             .json(&body)
             .send()
             .context("Gemini HTTP request failed")?;

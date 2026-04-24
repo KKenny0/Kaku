@@ -55,8 +55,16 @@ pub fn openai_messages_to_gemini(
                             .and_then(|f| f.get("arguments"))
                             .and_then(|a| a.as_str())
                             .unwrap_or("{}");
-                        let args: serde_json::Value =
-                            serde_json::from_str(raw_args).unwrap_or(serde_json::json!({}));
+                        let args: serde_json::Value = match serde_json::from_str(raw_args) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::warn!(
+                                    "Gemini tool call '{}': invalid JSON arguments: {e}",
+                                    name
+                                );
+                                serde_json::json!({})
+                            }
+                        };
                         parts.push(
                             serde_json::json!({"functionCall": {"name": name, "args": args}}),
                         );
@@ -129,13 +137,12 @@ pub fn openai_messages_to_gemini(
 }
 
 /// Build the Gemini streaming endpoint URL.
-pub fn gemini_stream_url(base_url: &str, model: &str, api_key: &str) -> String {
+///
+/// The API key is sent via the `x-goog-api-key` header at the call site,
+/// not embedded in the URL, to avoid leaking credentials in logs and caches.
+pub fn gemini_stream_url(base_url: &str, model: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    if api_key.is_empty() {
-        format!("{base}/v1beta/models/{model}:streamGenerateContent")
-    } else {
-        format!("{base}/v1beta/models/{model}:streamGenerateContent?key={api_key}")
-    }
+    format!("{base}/v1beta/models/{model}:streamGenerateContent")
 }
 
 // ─── Response streaming ───────────────────────────────────────────────────────
@@ -281,23 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn gemini_stream_url_with_key() {
+    fn gemini_stream_url_never_contains_key() {
         let url = gemini_stream_url(
             "https://generativelanguage.googleapis.com",
             "gemini-2.5-flash",
-            "AIzaKey",
         );
-        assert!(url.contains("streamGenerateContent?key=AIzaKey"));
         assert!(url.contains("gemini-2.5-flash"));
-    }
-
-    #[test]
-    fn gemini_stream_url_without_key() {
-        let url = gemini_stream_url(
-            "https://generativelanguage.googleapis.com",
-            "gemini-2.5-pro",
-            "",
-        );
-        assert!(!url.contains("key="));
+        assert!(url.contains("streamGenerateContent"));
+        assert!(!url.contains("key="), "API key must not appear in URL");
     }
 }

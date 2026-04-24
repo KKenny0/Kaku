@@ -925,6 +925,7 @@ pub fn execute(
                 // Hidden escape hatch: run user's custom fetch script.
                 let output = std::process::Command::new("bash")
                     .arg(script)
+                    .arg("--")
                     .arg(url)
                     .output()
                     .context("web_fetch_script exec failed")?;
