@@ -49,6 +49,19 @@ button:focus-visible,
   padding: 0 var(--kk-space-6);
 }
 
+/* Dark surface override for terminal blocks on a light page */
+.kk-dark-surface {
+  --kk-text: #e8e8e8;
+  --kk-text-dim: #999;
+  --kk-text-muted: #666;
+  --kk-accent: #00cc7a;
+  --kk-accent-dim: #00a86b;
+  --kk-bg-card: #1a1a1a;
+  --kk-border: #2a2a2a;
+  --kk-border-strong: #3a3a3a;
+  --kk-error: #ff5c5c;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

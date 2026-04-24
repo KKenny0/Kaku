@@ -1,17 +1,22 @@
 :root {
-  /* Colors — Terminal Hacker (warm-gray text + neon accent) */
-  --kk-bg: #0a0a0a;
-  --kk-bg-elev: #050505;
-  --kk-bg-card: #111111;
-  --kk-border: #1f1f1f;
-  --kk-border-strong: #2a2a2a;
-  --kk-text: #ffffff;
-  --kk-text-dim: #888888;
-  --kk-text-muted: #666666;
-  --kk-accent: #00ff9f;
-  --kk-accent-dim: #00b870;
-  --kk-error: #ff5c5c;
-  --kk-warn: #ffd56b;
+  /* Colors — Warm Terminal (parchment surfaces + deep green accent) */
+  --kk-bg: #f5f4ed;
+  --kk-bg-elev: #faf9f5;
+  --kk-bg-card: #ffffff;
+  --kk-border: #e8e5da;
+  --kk-border-strong: #d5d1c4;
+  --kk-text: #141413;
+  --kk-text-dim: #5e5d59;
+  --kk-text-muted: #87867f;
+  --kk-accent: #0d7d4d;
+  --kk-accent-dim: #0a6640;
+  --kk-error: #c93c3c;
+  --kk-warn: #b8860b;
+
+  /* Terminal blocks (stay dark) */
+  --kk-terminal-bg: #0e0e0e;
+  --kk-terminal-bar: #1a1a1a;
+  --kk-terminal-border: #2a2a2a;
 
   /* Typography */
   --kk-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -37,7 +42,4 @@
   --kk-max-wide: 1024px;
 }
 
-/* Force dark-only for v1. Light mode ships in v2. */
-:root[data-theme='light'] {
-  color-scheme: dark;
-}
+/* Light-only. No theme toggle needed. */

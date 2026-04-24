@@ -7,7 +7,7 @@ const isEn = lang === 'en';
 <section class="ai-section">
   <div class="kk-container">
     <div class="ai-tag">{isEn ? '[4] Natural Language → Command' : '[4] 自然语言 → 命令'}</div>
-    <div class="ai-box">
+    <div class="ai-box kk-dark-surface">
       <div class="row"><span class="muted">{isEn ? "# push today's changes to the feature branch" : '# 把今天的修改推到 feature 分支'}</span></div>
       <div class="row arrow" aria-hidden="true">{isEn ? '↓ Kaku auto-generates' : '↓ Kaku 自动生成'}</div>
       <div class="row cmd">git add . &amp;&amp; git commit -m "..." &amp;&amp; git push -u origin feature</div>
@@ -35,8 +35,8 @@ const isEn = lang === 'en';
     text-align: center;
   }
   .ai-box {
-    background: #0d1a12;
-    border: 1px solid #1a3a25;
+    background: var(--kk-terminal-bg);
+    border: 1px solid var(--kk-terminal-border);
     border-radius: var(--kk-radius-md);
     padding: var(--kk-space-6);
     font-family: var(--kk-font-mono);

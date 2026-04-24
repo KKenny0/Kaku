@@ -9,7 +9,7 @@ const isEn = lang === 'en';
 <section class="td-section">
   <div class="kk-container">
     <div class="td-tag">{isEn ? '[2] Auto Error Recovery' : '[2] 错误自动修复'}</div>
-    <div class="terminal" role="img" aria-label={isEn ? 'Terminal demo: Kaku detects a typo in npm run buidl, suggests npm run build, and applies the fix with ⌘⇧E' : '终端演示：Kaku 检测到 npm run buidl 拼写错误，建议改为 npm run build 并按 ⌘⇧E 应用修复'}>
+    <div class="terminal kk-dark-surface" role="img" aria-label={isEn ? 'Terminal demo: Kaku detects a typo in npm run buidl, suggests npm run build, and applies the fix with ⌘⇧E' : '终端演示：Kaku 检测到 npm run buidl 拼写错误，建议改为 npm run build 并按 ⌘⇧E 应用修复'}>
       <div class="term-bar" aria-hidden="true">
         <span class="dot red"></span>
         <span class="dot yellow"></span>
@@ -57,8 +57,8 @@ const isEn = lang === 'en';
     text-align: center;
   }
   .terminal {
-    background: #000;
-    border: 1px solid var(--kk-border-strong);
+    background: var(--kk-terminal-bg);
+    border: 1px solid var(--kk-terminal-border);
     border-radius: var(--kk-radius-md);
     overflow: hidden;
     box-shadow: 0 20px 60px color-mix(in srgb, var(--kk-accent) 5%, transparent);
@@ -66,7 +66,7 @@ const isEn = lang === 'en';
     margin: 0 auto var(--kk-space-8);
   }
   .term-bar {
-    background: #111;
+    background: var(--kk-terminal-bar);
     padding: var(--kk-space-2) var(--kk-space-4);
     display: flex;
     align-items: center;

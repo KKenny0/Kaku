@@ -21,7 +21,7 @@ import LandingLayout from '../../layouts/LandingLayout.astro';
           <div class="icon" aria-hidden="true">🍺</div>
           <strong>Homebrew</strong>
           <span>One command, auto-updates supported</span>
-          <pre><code>brew install tw93/tap/kakuku</code></pre>
+          <pre class="kk-dark-surface"><code>brew install tw93/tap/kakuku</code></pre>
         </div>
 
         <a class="method" href="https://github.com/tw93/Kaku#building-from-source" target="_blank" rel="noopener noreferrer">
@@ -79,8 +79,8 @@ import LandingLayout from '../../layouts/LandingLayout.astro';
   .method strong { color: var(--kk-text); font-size: 18px; }
   .method span { color: var(--kk-text-dim); font-size: 13px; }
   .method pre {
-    background: #000;
-    border: 1px solid var(--kk-border);
+    background: var(--kk-terminal-bg);
+    border: 1px solid var(--kk-terminal-border);
     border-radius: var(--kk-radius-sm);
     padding: var(--kk-space-3);
     font-size: 12px;

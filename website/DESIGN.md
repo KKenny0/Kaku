@@ -2,22 +2,25 @@
 version: alpha
 name: Kaku
 description: >
-  Terminal emulator for macOS. Dark-first, monospace-led design system
-  built around a neon-green accent on near-black surfaces. No light mode in v1.
+  Terminal emulator for macOS. Light-only warm parchment design with deep green
+  accent. Terminal blocks stay dark for semantic correctness.
 
 colors:
-  bg:            "#0a0a0a"
-  bg-elevated:   "#050505"
-  bg-card:       "#111111"
-  border:        "#1f1f1f"
-  border-strong: "#2a2a2a"
-  primary:       "#ffffff"
-  secondary:     "#888888"
-  muted:         "#666666"
-  accent:        "#00ff9f"
-  accent-dim:    "#00b870"
-  error:         "#ff5c5c"
-  warning:       "#ffd56b"
+  bg:            "#f5f4ed"
+  bg-elevated:   "#faf9f5"
+  bg-card:       "#ffffff"
+  border:        "#e8e5da"
+  border-strong: "#d5d1c4"
+  primary:       "#141413"
+  secondary:     "#5e5d59"
+  muted:         "#87867f"
+  accent:        "#0d7d4d"
+  accent-dim:    "#0a6640"
+  error:         "#c93c3c"
+  warning:       "#b8860b"
+  terminal-bg:      "#0e0e0e"
+  terminal-bar:     "#1a1a1a"
+  terminal-border:  "#2a2a2a"
 
 typography:
   display:
@@ -95,7 +98,7 @@ components:
     rounded:         "{rounded.lg}"
     padding:         24px
   card-hover:
-    backgroundColor: "#161616"
+    borderColor: "{colors.border-strong}"
   divider:
     backgroundColor: "{colors.border}"
     height:          1px
@@ -106,22 +109,22 @@ components:
     textColor: "{colors.muted}"
     typography: label
   alert-error:
-    backgroundColor: "rgba(255,92,92,0.08)"
+    backgroundColor: "rgba(201,60,60,0.08)"
     textColor:       "{colors.error}"
     rounded:         "{rounded.md}"
     padding:         12px 16px
   alert-warning:
-    backgroundColor: "rgba(255,213,107,0.08)"
+    backgroundColor: "rgba(184,134,11,0.08)"
     textColor:       "{colors.warning}"
     rounded:         "{rounded.md}"
     padding:         12px 16px
   terminal:
-    backgroundColor: "#000000"
-    textColor:       "{colors.accent}"
+    backgroundColor: "{colors.terminal-bg}"
+    textColor:       "#00cc7a"
     rounded:         "{rounded.md}"
     padding:         16px
   badge:
-    backgroundColor: "rgba(0,255,159,0.08)"
+    backgroundColor: "rgba(13,125,77,0.08)"
     textColor:       "{colors.accent}"
     rounded:         "{rounded.sm}"
     padding:         3px 8px
@@ -133,70 +136,79 @@ components:
 ## Overview
 
 Kaku is a GPU-accelerated terminal emulator for macOS with built-in AI. The visual
-language is **raw terminal hacker**: pure-black surfaces, JetBrains Mono as the
-primary display typeface, and a single neon-green accent (`#00ff9f`) that connects
-the brand to the terminal output it renders. Every surface is dark; v1 ships no
-light mode.
+language is **warm terminal**: parchment surfaces with a deep green accent that
+connects the brand to terminal output. Terminal code blocks remain dark, creating
+a signature contrast against the warm light page.
 
 The tone is terse and technical. Copy is written for developers who already know
 what a terminal is. Decorative elements are removed in favour of motion that
 demonstrates the product (animated terminal replays, tab switching, copy feedback).
 
-The one thing this design leaves in memory: **green text on black**, the universal
-signal for "this is a terminal" — used here at brand scale.
+The design signature: **dark terminal blocks on a warm parchment page**, showing
+exactly what the product does while feeling approachable and premium.
 
 ## Colors
 
-The palette is deliberately minimal. One background family, one accent, two
-semantic states.
+The palette is deliberately minimal. One warm background family, one accent, two
+semantic states, plus a dedicated dark surface for terminal blocks.
 
-**Background family** — three steps of near-black create surface hierarchy without
-any light:
-
-| Token | Value | Role |
-|-------|-------|------|
-| `bg` | `#0a0a0a` | Page background |
-| `bg-elevated` | `#050505` | Nav, elevated chrome |
-| `bg-card` | `#111111` | Cards, panels, inset blocks |
-
-`bg-elevated` is darker than `bg` — the nav sits below the perceived horizon,
-reinforcing the full-bleed terminal feel. Do not reverse this; a lighter nav
-breaks the depth illusion.
-
-**Borders** — two steps, never more:
+**Background family** -- warm parchment surfaces create a layered reading
+experience:
 
 | Token | Value | Role |
 |-------|-------|------|
-| `border` | `#1f1f1f` | Default dividers, card outlines |
-| `border-strong` | `#2a2a2a` | Focused, hovered, or active states |
+| `bg` | `#f5f4ed` | Page background (parchment) |
+| `bg-elevated` | `#faf9f5` | Nav, footer, elevated chrome (ivory) |
+| `bg-card` | `#ffffff` | Cards, panels (white, subtle lift from parchment) |
 
-**Text** — three weights of white:
+Cards are white on parchment. The nav and footer use ivory to float above the
+page without competing with card surfaces.
 
-| Token | Value | Role |
-|-------|-------|------|
-| `primary` | `#ffffff` | Headings, primary copy |
-| `secondary` | `#888888` | Nav links, metadata, labels |
-| `muted` | `#666666` | Hints, placeholders, de-emphasised copy |
-
-**Accent** — the single colour commitment. Use it for interactive elements,
-highlights, and the terminal cursor. Never use it decoratively; it must always
-signal "actionable" or "output from the terminal".
+**Borders** -- warm sand tones, never cool gray:
 
 | Token | Value | Role |
 |-------|-------|------|
-| `accent` | `#00ff9f` | CTAs, links, focus rings, terminal output |
-| `accent-dim` | `#00b870` | Hover state of accent elements |
+| `border` | `#e8e5da` | Default dividers, card outlines |
+| `border-strong` | `#d5d1c4` | Focused, hovered, or active states |
 
-**Semantic** — error and warning only. Both are warm to contrast against the cool
-black base.
+**Text** -- warm near-black, three weights:
 
 | Token | Value | Role |
 |-------|-------|------|
-| `error` | `#ff5c5c` | Destructive actions, error states |
-| `warning` | `#ffd56b` | Non-blocking warnings |
+| `primary` | `#141413` | Headings, primary copy |
+| `secondary` | `#5e5d59` | Nav links, metadata, labels |
+| `muted` | `#87867f` | Hints, placeholders, de-emphasised copy |
+
+**Accent** -- deep terminal green. Use it for interactive elements, highlights,
+and links. Never use it decoratively; it must always signal "actionable".
+
+| Token | Value | Role |
+|-------|-------|------|
+| `accent` | `#0d7d4d` | CTAs, links, focus rings |
+| `accent-dim` | `#0a6640` | Hover state of accent elements |
+
+**Terminal surface** -- dedicated dark tokens for terminal blocks. These blocks
+represent the actual terminal and stay dark regardless of page theme.
+
+| Token | Value | Role |
+|-------|-------|------|
+| `terminal-bg` | `#0e0e0e` | Terminal window background |
+| `terminal-bar` | `#1a1a1a` | Terminal title bar |
+| `terminal-border` | `#2a2a2a` | Terminal window border |
+
+Inside terminal blocks, text and accent colors are overridden via the
+`.kk-dark-surface` utility class to use light-on-dark values (e.g. `#00cc7a`
+for accent, `#e8e8e8` for text).
+
+**Semantic** -- error and warning only:
+
+| Token | Value | Role |
+|-------|-------|------|
+| `error` | `#c93c3c` | Destructive actions, error states |
+| `warning` | `#b8860b` | Non-blocking warnings |
 
 Do not introduce additional colours. If a new state requires a colour, use opacity
-on an existing token (e.g. `rgba(0,255,159,0.08)` for the badge background).
+on an existing token (e.g. `rgba(13,125,77,0.08)` for the badge background).
 
 ## Typography
 
@@ -215,7 +227,7 @@ Scale in use:
 | Token | Size | Family | Weight | Use |
 |-------|------|--------|--------|-----|
 | `display` | 3rem / 48px | JetBrains Mono | 700 | H1, hero headline |
-| `display-mobile` | 2rem / 32px | JetBrains Mono | 700 | H1 at ≤ 720px |
+| `display-mobile` | 2rem / 32px | JetBrains Mono | 700 | H1 at <= 720px |
 | `body-md` | 1rem / 16px | System UI | 400 | Section intros, card descriptions |
 | `body-sm` | 0.875rem / 14px | System UI | 400 | Feature copy, FAQ answers |
 | `code` | 0.8125rem / 13px | JetBrains Mono | 400 | Inline code, CTA labels, nav links |
@@ -239,33 +251,30 @@ All containers: `margin: 0 auto`, `padding: 0 24px`.
 section, the heading-to-content gap is `24px`. Within a card grid, gap is `16px`.
 
 **Grid defaults**: FeatureGrid and Download methods use a 3-column grid on desktop
-(`min-width: 721px`), collapsing to 2-column at ≤ 720px, 1-column at ≤ 480px.
-ScreenshotGallery uses 2-column, collapsing to 1-column at ≤ 720px.
+(`min-width: 721px`), collapsing to 2-column at <= 720px, 1-column at <= 480px.
+ScreenshotGallery uses 2-column, collapsing to 1-column at <= 720px.
 
-The nav is sticky at `top: 0`, `height: 52px`, with a `border-bottom: 1px solid {border}`.
-It does not cast a shadow — shadow would imply a light source inconsistent with
-the near-black surfaces below.
+The nav is sticky at `top: 0`, `height: 52px`, with a `border-bottom: 1px solid
+{border}` and a subtle `box-shadow: 0 1px 3px rgba(0,0,0,0.04)`.
 
 ## Elevation & Depth
 
-Kaku uses **background-step depth** exclusively. No box shadows on page surfaces.
-Depth is created by making nested surfaces incrementally lighter (`bg` → `bg-card`).
+Kaku uses two depth models:
 
-The terminal component (`background: #000000`) is the one surface that inverts
-this logic — it drops below the page background to signal "this is the actual
-terminal". This is intentional.
+**Page surfaces** use upward depth: parchment (base) -> white cards (lifted).
+Cards use `border: 1px solid {border}` to define their boundary. On hover,
+`border-color` advances to `{border-strong}`.
 
-Cards use a `border: 1px solid {border}` to define their boundary. On hover,
-`border-color` advances to `{border-strong}` and `background` steps to `#161616`.
-No `box-shadow` is added on hover.
+**Terminal blocks** use downward depth: they drop below the page background into
+near-black, signaling "this is the actual terminal". The `.kk-dark-surface`
+utility class resets all color tokens inside the block to light-on-dark values.
 
 Focus rings use `outline: 2px solid {accent}` at `outline-offset: 2px`. This is
 the only place where accent appears as a border treatment.
 
 ## Shapes
 
-Radius is small and consistent with a developer tool aesthetic. Pill buttons and
-large radius cards would conflict with the terminal theme.
+Radius is small and consistent with a developer tool aesthetic.
 
 | Token | Value | Use |
 |-------|-------|-----|
@@ -279,16 +288,14 @@ the WhyKaku section.
 
 ## Components
 
-### Button — Primary
+### Button -- Primary
 
 Background: `{colors.accent}` / Text: `{colors.bg}` / Radius: `{rounded.md}`
 
 Padding `12px 20px`. Typography: `code` (JetBrains Mono 13px). On hover,
 background transitions to `{colors.accent-dim}`. On press: `scale(0.97)`.
-The text is always black-on-green — do not invert or make the background
-transparent.
 
-### Button — Ghost
+### Button -- Ghost
 
 Background: `transparent` / Border: `1px solid {colors.border-strong}` /
 Text: `{colors.primary}` / Radius: `{rounded.md}`
@@ -299,45 +306,46 @@ CTAs (e.g. "Read Docs", "View Changelog").
 
 ### Nav
 
-Height `52px`, background `{colors.bg-elevated}`, bottom border `{colors.border}`.
+Height `52px`, background `{colors.bg-elevated}`, bottom border `{colors.border}`,
+subtle shadow `0 1px 3px rgba(0,0,0,0.04)`.
 Brand uses `font-weight: 700`, `font-size: 16px`, system sans. Nav links use
-`code` typography in `{colors.secondary}`, transitioning to `{colors.primary}`
+`code` typography in `{colors.secondary}`, transitioning to `{colors.accent}`
 on hover. Language switcher and GitHub link sit at the right end.
 
 ### Card
 
 Background `{colors.bg-card}`, radius `{rounded.lg}`, padding `24px`, border
 `1px solid {colors.border}`. Cards are used in FeatureGrid and WhyKaku. They
-do not scroll or clip overflow — content is always fully visible.
+do not scroll or clip overflow.
 
 ### Terminal
 
-Background `#000000` (not `{colors.bg}`), radius `{rounded.md}`, padding `16px`.
-Text uses `code` typography in `{colors.accent}`. The "bar" (traffic-light row)
-uses three dots in `#333333`. Cursor is a blinking `_` in `{colors.accent}`.
+Background `{colors.terminal-bg}`, radius `{rounded.md}`, padding `16px`.
+Add `kk-dark-surface` class to the container. Text uses `code` typography.
+The "bar" uses three macOS traffic-light dots. Cursor is a blinking character
+in accent color.
 
 ### Badge / Tag
 
-Background `rgba(0,255,159,0.08)`, text `{colors.accent}`, radius `{rounded.sm}`,
-padding `3px 8px`. Label typography. Used to label section types ("AI Feature",
-version tags). Never use a solid accent background for a badge — it competes
-with the primary CTA.
+Background `rgba(13,125,77,0.08)`, text `{colors.accent}`, radius `{rounded.sm}`,
+padding `3px 8px`. Label typography.
 
 ## Do's and Don'ts
 
 **Do:**
-- Use `{colors.accent}` exclusively for actionable and terminal-output elements.
+- Use `{colors.accent}` exclusively for actionable elements.
 - Use JetBrains Mono for all headings and short labels.
-- Separate surface depth with background-color steps, not shadows.
+- Keep terminal blocks dark with `.kk-dark-surface` class.
+- Use warm grays throughout; never use cool blue-gray.
+- Use parchment (`#f5f4ed`) as page background, never pure white.
 - Apply `active:scale(0.97)` to all buttons and interactive cards.
 - Respect `prefers-reduced-motion`: disable CSS animations, keep layout transitions.
-- Maintain `color-scheme: dark` even if a user requests light mode (v1 contract).
 
 **Don't:**
 - Don't add a second accent colour. If you need a variant, use `accent-dim` or opacity.
-- Don't apply `box-shadow` to cards or nav — this breaks the background-step depth model.
-- Don't use Inter, Roboto, or any geometric sans for headings — the terminal identity lives in JetBrains Mono.
-- Don't add light-mode rules. Doing so before v2 ships will cause inconsistency.
-- Don't use `border-radius > 10px` on any surface. Larger radii feel inconsistent with a terminal tool.
-- Don't use `color.accent` as a section background fill — it reads as highlighted text or a bug.
+- Don't apply heavy `box-shadow` to cards. Use border and background steps.
+- Don't use Inter, Roboto, or any geometric sans for headings.
+- Don't use `border-radius > 10px` on any surface.
+- Don't use `color.accent` as a section background fill.
 - Don't introduce a third container width. Use narrow for text, wide for grids.
+- Don't add dark-mode rules. The site is light-only.

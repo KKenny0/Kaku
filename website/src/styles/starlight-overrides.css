@@ -1,6 +1,6 @@
 /* Bridge Kaku tokens (--kk-*) onto Starlight tokens (--sl-*).
-   Force Starlight into dark-only for v1. */
-:root, :root[data-theme='dark'], :root[data-theme='light'] {
+   Light-only: no theme toggle. */
+:root {
   --sl-color-bg: var(--kk-bg);
   --sl-color-bg-nav: var(--kk-bg-elev);
   --sl-color-bg-sidebar: var(--kk-bg-elev);
@@ -13,17 +13,15 @@
   --sl-font: var(--kk-font-sans);
   --sl-font-mono: var(--kk-font-mono);
 
-  /* Starlight uses a gray scale for prose body and headings.
-     Map the brightest grays to our white text token so docs prose
-     is white instead of the default off-gray. */
+  /* Gray scale for light mode: dark text → light borders */
   --sl-color-white: var(--kk-text);
   --sl-color-gray-1: var(--kk-text);
-  --sl-color-gray-2: var(--kk-text);
-  --sl-color-gray-3: #d4d4d4;
-  --sl-color-gray-4: #a8a8a8;
-  --sl-color-gray-5: var(--kk-text-dim);
-  --sl-color-gray-6: var(--kk-text-muted);
+  --sl-color-gray-2: #3a3a38;
+  --sl-color-gray-3: var(--kk-text-dim);
+  --sl-color-gray-4: var(--kk-text-muted);
+  --sl-color-gray-5: #b0afa8;
+  --sl-color-gray-6: #d5d1c4;
 }
 
-/* Hide theme selector since we're dark-only in v1 */
+/* Hide theme selector, light-only */
 starlight-theme-select { display: none !important; }
