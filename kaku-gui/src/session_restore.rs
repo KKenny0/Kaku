@@ -419,6 +419,7 @@ async fn restore_snapshot(snapshot: SavedWindowSnapshot) -> anyhow::Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub fn restore_previous_window_from_menu() {
     spawn(async move {
         let result = async {

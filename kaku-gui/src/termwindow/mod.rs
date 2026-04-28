@@ -1080,6 +1080,9 @@ pub struct TermWindow {
     toast: Option<(Instant, String, Duration)>,
     selection_copy_disabled_hint_shown: bool,
     last_window_title: String,
+
+    /// Panes that currently have an ai_chat overlay open; used to implement Cmd+L toggle.
+    ai_chat_overlay_panes: std::collections::HashSet<PaneId>,
 }
 
 impl TermWindow {
@@ -1667,6 +1670,7 @@ impl TermWindow {
             toast: None,
             selection_copy_disabled_hint_shown: false,
             last_window_title: String::new(),
+            ai_chat_overlay_panes: std::collections::HashSet::new(),
             live_resizing: false,
             pending_screen_change_resize: false,
             pending_pty_flush_after_resize: false,
@@ -2846,6 +2850,7 @@ impl TermWindow {
             "config was reloaded, overrides: {:?}",
             self.config_overrides
         );
+        self.show_toast_for("Applying config...".to_string(), 1200);
         self.key_table_state.clear_stack();
         self.connection_name = Connection::get().map_or_else(
             || {
@@ -3230,6 +3235,22 @@ impl TermWindow {
         }
 
         if !window_contains_pane {
+            return;
+        }
+
+        // `k` CLI running inside a Kaku pane signals us to open the AI chat overlay.
+        if name == "kaku_open_ai_chat" {
+            if let Some(win) = self.window.clone() {
+                win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+                    let mux = Mux::get();
+                    if let Some(pane) = mux.get_pane(pane_id) {
+                        let _ = term_window.perform_key_assignment(
+                            &pane,
+                            &KeyAssignment::EmitEvent("kaku-ai-chat".to_string()),
+                        );
+                    }
+                })));
+            }
             return;
         }
 
@@ -4201,9 +4222,8 @@ impl TermWindow {
                         ..SpawnCommand::default()
                     };
                     self.spawn_command(&spawn, SpawnWhere::NewTab);
-                } else {
-                    crate::session_restore::restore_previous_window_from_menu();
                 }
+                // No history: no-op, consistent with Chrome/Safari behavior
             }
             Nop | DisableDefaultAssignment => {}
             ReloadConfiguration => {
@@ -4289,6 +4309,11 @@ impl TermWindow {
             }
             EmitEvent(name) => {
                 if name == "kaku-ai-chat" {
+                    let pane_id_check = pane.pane_id();
+                    if self.ai_chat_overlay_panes.contains(&pane_id_check) {
+                        self.cancel_overlay_for_pane(pane_id_check);
+                        return Ok(PerformAssignmentResult::Handled);
+                    }
                     let dims = pane.get_dimensions();
                     // Collect only the last 20 visible rows for the implicit prompt context.
                     let bottom = dims.physical_top + dims.viewport_rows as StableRowIndex;
@@ -4378,6 +4403,7 @@ impl TermWindow {
                             crate::overlay::ai_chat::ai_chat_overlay(pane_id, term, context)
                         });
                     self.assign_overlay_for_pane(pane_id, overlay);
+                    self.ai_chat_overlay_panes.insert(pane_id);
                     promise::spawn::spawn(async move {
                         if let Err(e) = future.await {
                             log::error!("AI chat overlay error for pane {pane_id}: {e:#}");
@@ -5884,6 +5910,7 @@ impl TermWindow {
                 Mux::get().remove_pane(overlay.pane.pane_id());
             }
         }
+        self.ai_chat_overlay_panes.remove(&pane_id);
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }
