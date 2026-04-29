@@ -433,13 +433,41 @@ impl AiClient {
             .header("Accept-Encoding", "identity")
             .json(&body);
         let req = self.apply_auth_headers(req)?;
-        let response = req.send().context("HTTP request failed")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, body);
+        let mut last_err = String::new();
+        let mut response = None;
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                let backoff = std::time::Duration::from_secs(1 << attempt);
+                std::thread::sleep(backoff);
+                if cancelled.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelled during retry backoff");
+                }
+            }
+            let r = match req.try_clone().context("clone request")?.send() {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e.to_string();
+                    log::warn!("HTTP attempt {}: {}", attempt + 1, last_err);
+                    continue;
+                }
+            };
+            let status = r.status();
+            if status.is_success() {
+                response = Some(r);
+                break;
+            }
+            let code = status.as_u16();
+            let body = r.text().unwrap_or_default();
+            if code == 429 || code >= 500 {
+                let preview: String = body.chars().take(200).collect();
+                last_err = format!("API error {}: {}", code, preview);
+                log::warn!("HTTP attempt {} retryable: {}", attempt + 1, last_err);
+                continue;
+            }
+            anyhow::bail!("API error {}: {}", code, body);
         }
+        let response = response.ok_or_else(|| anyhow::anyhow!("API request failed after 3 attempts: {}", last_err))?;
 
         let reader = BufReader::new(response);
         // Accumulate tool call fragments by index; each index is one pending call.
@@ -466,7 +494,9 @@ impl AiClient {
                 }
             };
 
-            let choice = &chunk["choices"][0];
+            let Some(choice) = chunk["choices"].get(0) else {
+                continue;
+            };
 
             // Capture finish_reason when present.
             if let Some(fr) = choice["finish_reason"].as_str() {
@@ -502,7 +532,9 @@ impl AiClient {
                         entry.name = name.to_string();
                     }
                     if let Some(args) = tc["function"]["arguments"].as_str() {
-                        entry.arguments.push_str(args);
+                        if entry.arguments.len() < 65_536 {
+                            entry.arguments.push_str(args);
+                        }
                     }
                 }
             }

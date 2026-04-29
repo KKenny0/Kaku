@@ -3,13 +3,13 @@
 use crate::ai_client::ApiMessage;
 use std::path::PathBuf;
 
-const FS_READ_CAP: usize = 200;
-const GREP_CAP: usize = 50;
-const GREP_HEAD: usize = 30;
-const GREP_TAIL: usize = 10;
-const BASH_CAP: usize = 100;
-const BASH_HEAD: usize = 50;
-const BASH_TAIL: usize = 30;
+const FS_READ_CAP: usize = 300;
+const GREP_CAP: usize = 100;
+const GREP_HEAD: usize = 70;
+const GREP_TAIL: usize = 20;
+const BASH_CAP: usize = 150;
+const BASH_HEAD: usize = 100;
+const BASH_TAIL: usize = 40;
 
 fn compact_tool_content(tool_name: &str, content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
@@ -20,7 +20,7 @@ fn compact_tool_content(tool_name: &str, content: &str) -> Option<String> {
             FS_READ_CAP,
             lines[..FS_READ_CAP].join("\n")
         )),
-        "grep_search" | "fs_search" | "fs_list" if lines.len() > GREP_CAP => {
+        "grep_search" | "symbol_search" | "fs_search" | "fs_list" if lines.len() > GREP_CAP => {
             let total = lines.len();
             Some(format!(
                 "{}\n[{} lines elided]\n{}",
