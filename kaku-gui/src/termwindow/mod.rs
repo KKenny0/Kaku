@@ -2308,9 +2308,16 @@ impl TermWindow {
                             front_end().adjust_unread_bell_count(-1);
                         }
                     }
+                    // Closing a pane redistributes the freed space to siblings,
+                    // so any overlay (e.g. AI chat) on a sibling needs its size
+                    // updated to match the pane's new dimensions.
+                    self.resize_overlays();
                     self.update_title_post_status();
                 }
                 MuxNotification::PaneAdded(_) => {
+                    // A new split shrinks the donor pane; if that pane has an
+                    // overlay open (e.g. AI chat), the overlay must shrink too.
+                    self.resize_overlays();
                     self.update_title_post_status();
                 }
                 MuxNotification::WorkspaceRenamed { .. }
