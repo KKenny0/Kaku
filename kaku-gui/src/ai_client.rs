@@ -467,7 +467,8 @@ impl AiClient {
             }
             anyhow::bail!("API error {}: {}", code, body);
         }
-        let response = response.ok_or_else(|| anyhow::anyhow!("API request failed after 3 attempts: {}", last_err))?;
+        let response = response
+            .ok_or_else(|| anyhow::anyhow!("API request failed after 3 attempts: {}", last_err))?;
 
         let reader = BufReader::new(response);
         // Accumulate tool call fragments by index; each index is one pending call.
