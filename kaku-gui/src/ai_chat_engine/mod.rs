@@ -41,7 +41,7 @@ pub enum StreamMsg {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-/// Build the static system prompt (soul-augmented).
+#[allow(dead_code)]
 pub(crate) fn build_system_prompt() -> String {
     let base = include_str!("../overlay/ai_chat/prompt.txt");
     let identity = crate::soul::load_for_prompt();
@@ -55,7 +55,7 @@ pub(crate) fn build_system_prompt() -> String {
     }
 }
 
-/// Build a minimal environment message for the CLI (no visible terminal snapshot).
+#[allow(dead_code)]
 pub(crate) fn build_cli_environment_message(cwd: &str) -> ApiMessage {
     let now = chrono::Local::now();
     let mut s = format!(
@@ -478,12 +478,14 @@ fn limit_memory_entries(text: &str, max: usize) -> String {
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 const MAX_HISTORY_PAIRS: usize = 10;
 
 /// Shared AI chat engine used by both the overlay and the `k` CLI.
 ///
 /// Manages conversation state (load, save, cwd), builds API messages,
 /// and dispatches to `run_agent`.
+#[allow(dead_code)]
 pub struct Engine {
     pub active_id: String,
     pub messages: Vec<PersistedMessage>,
@@ -493,6 +495,7 @@ pub struct Engine {
     cancel_flag: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl Engine {
     /// Create a new engine for the given `cwd`, loading the active conversation.
     pub fn new(cwd: String, client: AiClient, model: String) -> anyhow::Result<Self> {

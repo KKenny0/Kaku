@@ -342,6 +342,7 @@ pub fn update_summary(id: &str, summary: &str) -> Result<()> {
 // ── cwd index (used by the `k` CLI) ──────────────────────────────────────────
 
 /// Set or update the `cwd -> conv_id` mapping.
+#[allow(dead_code)]
 pub fn write_cwd_index(cwd: &str, conv_id: &str) -> Result<()> {
     let dir = conversations_dir()?;
     let path = dir.join("cwd_index.json");
@@ -358,6 +359,7 @@ pub fn write_cwd_index(cwd: &str, conv_id: &str) -> Result<()> {
 /// Look up a cwd mapping; if present and the conv file still exists, return
 /// that conv_id. Otherwise create a new active conversation, record the
 /// mapping, and return the new id.
+#[allow(dead_code)]
 pub fn resolve_or_create_conv_for_cwd(cwd: &str) -> Result<String> {
     let dir = conversations_dir()?;
     let path = dir.join("cwd_index.json");

@@ -518,6 +518,12 @@ impl super::TermWindow {
             None => return,
         };
 
+        // During IME composition, skip key binding processing so that
+        // interpretKeyEvents can handle the key (e.g. Tab completing "table").
+        if self.dead_key_status != DeadKeyStatus::None {
+            return;
+        }
+
         if key.key_is_down
             && self.pane_state(pane.pane_id()).overlay.is_none()
             && !leader_active

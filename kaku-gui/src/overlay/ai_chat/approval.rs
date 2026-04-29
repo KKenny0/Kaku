@@ -1,5 +1,3 @@
-pub(crate) use crate::ai_chat_engine::approval::approval_summary;
-
 use crate::ai_client::ApiMessage;
 use crate::overlay::ai_chat::TerminalContext;
 use std::sync::OnceLock;

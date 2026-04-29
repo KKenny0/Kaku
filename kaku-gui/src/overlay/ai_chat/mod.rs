@@ -85,6 +85,7 @@ impl ChatPalette {
         a
     }
 
+    #[allow(dead_code)]
     pub fn accent_cell(&self) -> CellAttributes {
         self.make_attrs(self.accent_attr(), self.bg_attr())
     }
@@ -317,6 +318,7 @@ const SPINNER_INTERVAL_MS: u128 = 80;
 /// scroll internally. Keeps the message area from collapsing when a user
 /// pastes or types a long prompt while still showing enough context to edit.
 const MAX_INPUT_VISIBLE_ROWS: usize = 5;
+const MAX_PICKER_ROWS: usize = 6;
 
 /// UI mode: normal chat or conversation picker.
 pub(crate) enum AppMode {
@@ -389,8 +391,6 @@ pub(crate) struct App {
     /// True until the user submits their first message in a brand-new session.
     /// Cleared (and flag file created) on first submit so onboarding never repeats.
     pub(crate) onboarding_pending: bool,
-    /// User pressed Enter while streaming; auto-submit input when stream ends.
-    pub(crate) queued_submit: bool,
     /// Whether the user has clicked the input row during the current streaming
     /// response. While streaming, the input cursor is hidden until this becomes
     /// true so the visual focus stays on the AI output; a deliberate click
@@ -555,7 +555,6 @@ impl App {
             spinner_frame: 0,
             spinner_tick: Instant::now(),
             onboarding_pending,
-            queued_submit: false,
             input_clicked_this_stream: false,
             input_undo_stack: Vec::new(),
             stream_is_transient: false,
@@ -912,9 +911,7 @@ impl App {
     /// Prompt prefix shown in front of the input. Width is stable across
     /// spinner frames (each glyph is single-cell, see SPINNER_FRAMES_INPUT).
     fn current_input_prompt(&self) -> String {
-        if self.queued_submit {
-            format!("  {} ↵ ", self.spinner_char_input())
-        } else if self.is_streaming {
+        if self.is_streaming {
             format!("  {} ", self.spinner_char_input())
         } else {
             "  > ".to_string()
@@ -1357,24 +1354,59 @@ fn emit_assistant_markdown(out: &mut Vec<DisplayLine>, content: &str, width: usi
                     }
                 }
             }
-            MdBlock::CodeLine(text) => {
-                // Code lines are never inline-parsed; the whole line is one Code span.
+            MdBlock::CodeLine { text, diff } => {
+                let block = match diff {
+                    DiffKind::Add => BlockStyle::DiffAdd,
+                    DiffKind::Remove => BlockStyle::DiffRemove,
+                    DiffKind::Hunk => BlockStyle::DiffHunk,
+                    DiffKind::None => BlockStyle::Code,
+                };
                 let seg = vec![InlineSpan {
                     text,
                     style: InlineStyle::Code,
                 }];
-                // Don't wrap aggressively inside code: truncate at render time if too wide.
-                // But still split very long lines to avoid clipping all content.
                 for wrapped in wrap_segments(&seg, width) {
                     out.push(DisplayLine::Text {
                         segments: wrapped,
                         role: Role::Assistant,
-                        block: BlockStyle::Code,
+                        block,
                     });
                 }
             }
         }
     }
+}
+
+// ─── System notification helpers ─────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+fn app_is_active() -> bool {
+    #[allow(unexpected_cfgs)]
+    unsafe {
+        use cocoa::appkit::NSApp;
+        use objc::*;
+        let app = NSApp();
+        let active: cocoa::base::BOOL = msg_send![app, isActive];
+        active != cocoa::base::NO
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_is_active() -> bool {
+    true
+}
+
+fn send_unfocused_notification(title: &str, body: &str) {
+    if app_is_active() {
+        return;
+    }
+    wezterm_toast_notification::ToastNotification {
+        title: title.to_string(),
+        message: body.to_string(),
+        url: None,
+        timeout: Some(Duration::from_secs(6)),
+    }
+    .show();
 }
 
 impl App {
@@ -1641,6 +1673,8 @@ impl App {
                         changed = true;
                     }
                     Ok(StreamMsg::ApprovalRequired { summary, reply_tx }) => {
+                        let short: String = summary.chars().take(100).collect();
+                        send_unfocused_notification("Kaku AI 需要确认", &short);
                         self.pending_approval = Some((summary, reply_tx));
                         changed = true;
                         // Stop draining; wait for user to respond before processing more.
@@ -1733,6 +1767,9 @@ impl App {
             self.is_streaming = false;
             let was_transient = self.stream_is_transient;
             self.stream_is_transient = false;
+            if !was_transient && self.stream_pending_err.is_none() {
+                send_unfocused_notification("Kaku AI 任务完成", "AI 已完成回复，可以查看结果");
+            }
             if !was_transient {
                 self.save_history();
             }
@@ -1759,14 +1796,6 @@ impl App {
                     }
                     maybe_extract_memories(&client, &msgs);
                 });
-            }
-            // Consume any queued submit (only on success; on error keep the
-            // staged input so the user can review the failure before resending).
-            if self.stream_pending_err.is_none() && self.queued_submit {
-                self.queued_submit = false;
-                if !self.input.trim().is_empty() {
-                    self.submit();
-                }
             }
             changed = true;
         }
@@ -2298,12 +2327,23 @@ pub(crate) struct InlineSpan {
 /// line-level decoration (indent, bullet, rule), while `InlineStyle` spans
 /// inside the line carry character-level emphasis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DiffKind {
+    None,
+    Add,
+    Remove,
+    Hunk,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BlockStyle {
     Normal,
     Heading(u8),
     Quote,
     Hr,
     Code,
+    DiffAdd,
+    DiffRemove,
+    DiffHunk,
     /// First wrapped line of a list item (renders the bullet/number); subsequent
     /// wrapped lines of the same item use `ListContinuation` to keep the indent
     /// without re-emitting the marker.
@@ -2351,7 +2391,7 @@ pub(crate) enum MdBlock {
     Heading { level: u8, text: String },
     Quote(String),
     ListItem { marker: String, text: String },
-    CodeLine(String),
+    CodeLine { text: String, diff: DiffKind },
     Hr,
 }
 
@@ -2366,6 +2406,19 @@ pub(crate) enum MdBlock {
 fn inline_cell(style: InlineStyle, block: BlockStyle, pal: &ChatPalette) -> CellAttributes {
     // Heading lines use the accent (AI header) color as their base, regardless
     // of inline style: inline emphasis inside a heading still reads naturally.
+    // Diff lines use semantic colors independent of the palette.
+    if let BlockStyle::DiffAdd | BlockStyle::DiffRemove | BlockStyle::DiffHunk = block {
+        let fg = match block {
+            BlockStyle::DiffAdd => {
+                ColorAttribute::TrueColorWithDefaultFallback(SrgbaTuple(0.349, 0.733, 0.451, 1.0))
+            }
+            BlockStyle::DiffRemove => {
+                ColorAttribute::TrueColorWithDefaultFallback(SrgbaTuple(0.875, 0.408, 0.408, 1.0))
+            }
+            _ => ColorAttribute::TrueColorWithDefaultFallback(SrgbaTuple(0.561, 0.631, 0.749, 1.0)),
+        };
+        return pal.make_attrs(fg, pal.bg_attr());
+    }
     let base = match block {
         BlockStyle::Heading(_) => pal.ai_header_cell(),
         BlockStyle::Quote => pal.input_cell(), // dim fg for block-quoted text
@@ -2608,6 +2661,32 @@ fn push_picker_row(
     changes.push(Change::Text("│".to_string()));
 }
 
+fn render_vertical_picker(
+    changes: &mut Vec<Change>,
+    start_row: usize,
+    inner_w: usize,
+    pal: &ChatPalette,
+    options: &[(&str, &str)],
+    selected: usize,
+) {
+    let len = options.len();
+    let visible_h = len.min(MAX_PICKER_ROWS);
+    let scroll_offset = selected
+        .saturating_sub(visible_h.saturating_sub(1))
+        .min(len.saturating_sub(visible_h));
+    for i in 0..visible_h {
+        let opt_idx = scroll_offset + i;
+        let (label, desc) = options[opt_idx];
+        let attr = if opt_idx == selected {
+            pal.picker_cursor_cell()
+        } else {
+            pal.ai_text_cell()
+        };
+        let runs = vec![(attr, format!(" {}  {}", label, desc))];
+        push_picker_row(changes, start_row + i, inner_w, pal, runs);
+    }
+}
+
 fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
     let cols = app.cols;
     let rows = app.rows;
@@ -2648,11 +2727,25 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         x: Position::Absolute(0),
         y: Position::Absolute(0),
     });
-    changes.push(Change::AllAttributes(pal.accent_cell()));
+    changes.push(Change::AllAttributes(pal.border_dim_cell()));
     changes.push(Change::Text(truncate(&top_line, cols)));
 
     // 3. Message area.
-    let msg_area_h = app.msg_area_height();
+    let input_visible_h = app.input_visible_rows();
+    let slash_options = app.slash_picker_options();
+    let attach_options = app.attachment_picker_options();
+    let picker_h = {
+        let opt_len = if !slash_options.is_empty() {
+            slash_options.len()
+        } else if !attach_options.is_empty() {
+            attach_options.len()
+        } else {
+            0
+        };
+        let max_h = rows.saturating_sub(input_visible_h + 3);
+        opt_len.min(MAX_PICKER_ROWS).min(max_h)
+    };
+    let msg_area_h = rows.saturating_sub(3 + input_visible_h + picker_h);
     let all_lines = app.display_lines();
     let total = all_lines.len();
 
@@ -2723,60 +2816,33 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::Text("│".to_string()));
     }
 
-    // 4. Separator row, also used for inline slash-command / attachment suggestions.
-    // sep_row sits just above the (possibly multi-row) input box.
-    let input_visible_h = app.input_visible_rows();
+    // 4. Vertical picker (above separator) + separator row.
     let sep_row = rows.saturating_sub(2 + input_visible_h);
-    let slash_options = app.slash_picker_options();
-    let attach_options = app.attachment_picker_options();
-    if !slash_options.is_empty() {
-        let selected = app.attachment_picker_index.min(slash_options.len() - 1);
-        let mut runs: Vec<(CellAttributes, String)> = vec![(
-            pal.input_cell(),
-            "  ↑↓ navigate · Enter select   ".to_string(),
-        )];
-        for (idx, (label, desc)) in slash_options.iter().enumerate() {
-            if idx > 0 {
-                runs.push((pal.input_cell(), "  ".to_string()));
-            }
-            let attr = if idx == selected {
-                pal.picker_cursor_cell()
-            } else {
-                pal.ai_text_cell()
-            };
-            runs.push((attr, format!("{} {}", label, desc)));
+    if picker_h > 0 {
+        let picker_start = sep_row.saturating_sub(picker_h);
+        let selected = app.attachment_picker_index;
+        if !slash_options.is_empty() {
+            let opts: Vec<(&str, &str)> = slash_options.iter().map(|(l, d)| (*l, *d)).collect();
+            let clamped = selected.min(opts.len().saturating_sub(1));
+            render_vertical_picker(&mut changes, picker_start, inner_w, pal, &opts, clamped);
+        } else {
+            let opts: Vec<(&str, &str)> = attach_options
+                .iter()
+                .map(|o| (o.label, o.description))
+                .collect();
+            let clamped = selected.min(opts.len().saturating_sub(1));
+            render_vertical_picker(&mut changes, picker_start, inner_w, pal, &opts, clamped);
         }
-        push_picker_row(&mut changes, sep_row, inner_w, pal, runs);
-    } else if !attach_options.is_empty() {
-        let selected = app.attachment_picker_index.min(attach_options.len() - 1);
-        let mut runs: Vec<(CellAttributes, String)> = vec![(
-            pal.input_cell(),
-            "  ↑↓ navigate · Tab select   ".to_string(),
-        )];
-        for (idx, option) in attach_options.iter().enumerate() {
-            if idx > 0 {
-                runs.push((pal.input_cell(), "  ".to_string()));
-            }
-            let attr = if idx == selected {
-                pal.picker_cursor_cell()
-            } else {
-                pal.ai_text_cell()
-            };
-            runs.push((attr, format!("{} {}", option.label, option.description)));
-        }
-        push_picker_row(&mut changes, sep_row, inner_w, pal, runs);
-    } else {
-        // No active picker: plain separator; hints are shown as input placeholder.
-        changes.push(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Absolute(sep_row),
-        });
-        changes.push(Change::AllAttributes(pal.border_dim_cell()));
-        changes.push(Change::Text(format!(
-            "├{}┤",
-            "─".repeat(inner_w.saturating_sub(0))
-        )));
     }
+    changes.push(Change::CursorPosition {
+        x: Position::Absolute(0),
+        y: Position::Absolute(sep_row),
+    });
+    changes.push(Change::AllAttributes(pal.border_dim_cell()));
+    changes.push(Change::Text(format!(
+        "├{}┤",
+        "─".repeat(inner_w.saturating_sub(0))
+    )));
 
     // 5. Input area (one or more rows). Approval banner, when present,
     // always takes a single row.
@@ -2808,8 +2874,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         None // hidden
     } else {
         // Show a pulsing spinner instead of `>` while streaming so the user
-        // sees the response is still in progress. If a follow-up message is
-        // queued (Enter pressed during streaming), add a ↵ glyph to signal it.
+        // sees the response is still in progress.
         let prompt = app.current_input_prompt();
         let layout = layout_input(&prompt, &app.input, app.input_cursor, inner_w);
         let total_rows = layout.rows.len();
@@ -2866,7 +2931,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         x: Position::Absolute(0),
         y: Position::Absolute(bot_row),
     });
-    changes.push(Change::AllAttributes(pal.accent_cell()));
+    changes.push(Change::AllAttributes(pal.border_dim_cell()));
     changes.push(Change::Text(format!(
         "╰{}╯",
         "─".repeat(inner_w.saturating_sub(0))
@@ -2922,7 +2987,7 @@ fn render_picker(
         x: Position::Absolute(0),
         y: Position::Absolute(0),
     });
-    changes.push(Change::AllAttributes(pal.accent_cell()));
+    changes.push(Change::AllAttributes(pal.border_dim_cell()));
     changes.push(Change::Text(truncate(&top_line, cols)));
 
     // List area
@@ -2995,7 +3060,7 @@ fn render_picker(
         x: Position::Absolute(0),
         y: Position::Absolute(bot_row),
     });
-    changes.push(Change::AllAttributes(pal.accent_cell()));
+    changes.push(Change::AllAttributes(pal.border_dim_cell()));
     changes.push(Change::Text(format!("╰{}╯", "─".repeat(inner_w))));
 
     // End atomic frame.
@@ -3060,28 +3125,13 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         .is_some_and(|(_, _, token)| picker_options.iter().any(|option| option.label == token));
 
     match (&key.key, key.modifiers) {
-        // Escape / Ctrl+C: cancel a running stream; exit the overlay when idle.
+        // Escape / Ctrl+C: cancel any running stream and exit the overlay.
         (KeyCode::Escape, _) | (KeyCode::Char('C'), Modifiers::CTRL) => {
-            app.cancel_flag.store(true, Ordering::Relaxed);
             if app.is_streaming || !app.grapheme_queue.is_empty() {
-                // Interrupt the ongoing response without closing the overlay.
-                // Drain the typewriter queue so output stops immediately.
+                app.cancel_flag.store(true, Ordering::Relaxed);
                 app.grapheme_queue.clear();
-                // Discard any queued follow-up so it doesn't fire after cancel.
-                app.queued_submit = false;
-                // Mark any incomplete assistant message as done.
-                if let Some(last) = app
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| !m.is_tool() && !m.complete)
-                {
-                    last.complete = true;
-                }
-                Action::Continue
-            } else {
-                Action::Quit
             }
+            Action::Quit
         }
 
         // Submit: built-in control commands execute immediately. Waza commands
@@ -3104,10 +3154,22 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
             app.submit();
             Action::Continue
         }
-        // Streaming: queue a non-empty input for auto-submit when stream ends.
+        // Streaming + non-empty input: interrupt current stream and submit immediately.
         (KeyCode::Enter, Modifiers::NONE) => {
             if !app.input.trim().is_empty() {
-                app.queued_submit = true;
+                app.cancel_stream();
+                if let Some(last) = app
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| !m.is_tool() && !m.complete)
+                {
+                    last.complete = true;
+                }
+                app.scroll_offset = 0;
+                app.submit();
+            } else if app.scroll_offset > 0 {
+                app.scroll_offset = 0;
             }
             Action::Continue
         }
@@ -3539,7 +3601,20 @@ pub fn ai_chat_overlay(
         match term.poll_input(timeout)? {
             Some(InputEvent::Key(key)) => {
                 match handle_key(&key, &mut app) {
-                    Action::Quit => break,
+                    Action::Quit => {
+                        if app.is_streaming || app.stream_pending_done {
+                            if let Some(last) = app
+                                .messages
+                                .iter_mut()
+                                .rev()
+                                .find(|m| !m.is_tool() && !m.complete)
+                            {
+                                last.complete = true;
+                            }
+                        }
+                        app.save_history();
+                        break;
+                    }
                     Action::Continue => {}
                 }
                 needs_redraw = true;
@@ -3840,22 +3915,26 @@ fn extract_selection_text(app: &App) -> Option<String> {
 }
 
 /// Copy text to the system clipboard via pbcopy (macOS).
+/// Spawns a detached thread so the chat thread is never blocked by IPC.
 fn copy_to_clipboard(text: &str) {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let mut child = match Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("Failed to spawn pbcopy: {e}");
-            return;
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        let mut child = match Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Failed to spawn pbcopy: {e}");
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
         }
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes());
-    }
-    let _ = child.wait();
+        // stdin drop closes the pipe; pbcopy exits naturally.
+        let _ = child.wait();
+    });
 }
 
 // Style helpers are now methods on ChatPalette (see struct definition above).
@@ -4014,7 +4093,7 @@ mod markdown_tests {
         let code_lines: Vec<&str> = blocks
             .iter()
             .filter_map(|b| match b {
-                MdBlock::CodeLine(s) => Some(s.as_str()),
+                MdBlock::CodeLine { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();

@@ -1,19 +1,48 @@
-use crate::overlay::ai_chat::{InlineSpan, InlineStyle, MdBlock};
+use crate::overlay::ai_chat::{DiffKind, InlineSpan, InlineStyle, MdBlock};
 use termwiz::cell::unicode_column_width;
 use unicode_segmentation::UnicodeSegmentation;
 
+fn classify_diff_line(line: &str) -> DiffKind {
+    if line.starts_with("+++ ") || line.starts_with("--- ") || line.starts_with("@@ ") {
+        DiffKind::Hunk
+    } else if line.starts_with('+') && !line.starts_with("++") {
+        DiffKind::Add
+    } else if line.starts_with('-') && !line.starts_with("--") {
+        DiffKind::Remove
+    } else {
+        DiffKind::None
+    }
+}
+
 pub(crate) fn parse_markdown_blocks(content: &str) -> Vec<MdBlock> {
     let mut out = Vec::new();
-    let mut in_fence = false;
+    let mut fence_lang: Option<String> = None;
     for line in content.split('\n') {
         let trimmed_start = line.trim_start();
         // Fence open/close: ``` or ~~~ on their own (possibly with info string).
         if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-            in_fence = !in_fence;
+            if fence_lang.is_some() {
+                fence_lang = None;
+            } else {
+                let tag = trimmed_start
+                    .trim_start_matches('`')
+                    .trim_start_matches('~')
+                    .trim()
+                    .to_lowercase();
+                fence_lang = Some(tag);
+            }
             continue;
         }
-        if in_fence {
-            out.push(MdBlock::CodeLine(line.to_string()));
+        if let Some(ref lang) = fence_lang {
+            let diff = if lang == "diff" || lang == "patch" {
+                classify_diff_line(line)
+            } else {
+                DiffKind::None
+            };
+            out.push(MdBlock::CodeLine {
+                text: line.to_string(),
+                diff,
+            });
             continue;
         }
         if trimmed_start.is_empty() {
