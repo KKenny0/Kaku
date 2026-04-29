@@ -368,6 +368,83 @@ pub fn all_tools(config: &AssistantConfig) -> Vec<ToolDef> {
         });
     }
 
+    // project_summary: zero-cost project context from marker files.
+    tools.push(ToolDef {
+        name: "project_summary",
+        description: Cow::Borrowed(
+            "Scan a directory for project markers (Cargo.toml, package.json, go.mod, \
+             Makefile, .git, etc.) and return a brief summary: language, build system, \
+             key directories, entry points. Call this first on unfamiliar codebases.",
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory to scan (defaults to cwd)"
+                }
+            },
+            "required": []
+        }),
+    });
+
+    // file_tree: directory tree with depth limit, respecting .gitignore.
+    tools.push(ToolDef {
+        name: "file_tree",
+        description: Cow::Borrowed(
+            "List the directory tree up to a given depth, skipping .git, node_modules, \
+             target, and other common noise directories. Useful for understanding project \
+             structure before searching.",
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Root directory (defaults to cwd)"
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Maximum depth to recurse (default 3, max 6)"
+                }
+            },
+            "required": []
+        }),
+    });
+
+    // symbol_search: language-aware definition search using rg.
+    tools.push(ToolDef {
+        name: "symbol_search",
+        description: Cow::Borrowed(
+            "Find symbol definitions (functions, types, traits, classes, methods) by name. \
+             More precise than grep_search for code navigation because it uses language-aware \
+             patterns to match definitions, not arbitrary occurrences.",
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Symbol name or partial name to search for"
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["function", "type", "class", "method", "all"],
+                    "description": "Kind of symbol to find (default: all)"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search in (defaults to cwd)"
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "File glob filter, e.g. '*.rs' or '*.{ts,tsx}'"
+                }
+            },
+            "required": ["query"]
+        }),
+    });
+
     // grep_search: fast recursive text/regex search across files.
     tools.push(ToolDef {
         name: "grep_search",
@@ -526,8 +603,9 @@ const SHELL_EXEC_TIMEOUT_SECS: u64 = 60;
 ///   "full"    -> expanded cap for deep inspection
 fn budget_for(tool: &str, detail: &str) -> usize {
     let (default_bytes, max_bytes): (usize, usize) = match tool {
-        "fs_list" | "pwd" | "memory_read" | "soul_read" => (2_000, 4_000),
-        "fs_read" | "grep_search" => (8_000, 16_000),
+        "fs_list" | "pwd" | "memory_read" | "soul_read" | "project_summary" => (2_000, 4_000),
+        "fs_read" | "grep_search" | "symbol_search" => (8_000, 16_000),
+        "file_tree" => (4_000, 8_000),
         "shell_exec" | "shell_poll" => (12_000, 24_000),
         "web_fetch" | "read_url" => (10_000, 20_000),
         "shell_bg" => (8_000, 8_000),
@@ -1005,6 +1083,30 @@ pub fn execute(
             let api_key = config.web_search_api_key.as_deref().unwrap_or("");
             exec_read_url(url, provider, api_key)?
         }
+        "project_summary" => {
+            let scan_path = args["path"]
+                .as_str()
+                .map(|p| resolve(p, cwd))
+                .transpose()?
+                .unwrap_or_else(|| PathBuf::from(cwd.as_str()));
+            exec_project_summary(&scan_path)?
+        }
+        "file_tree" => {
+            let tree_path = args["path"]
+                .as_str()
+                .map(|p| resolve(p, cwd))
+                .transpose()?
+                .unwrap_or_else(|| PathBuf::from(cwd.as_str()));
+            let depth = args["depth"].as_u64().unwrap_or(3).min(6) as usize;
+            exec_file_tree(&tree_path, depth)?
+        }
+        "symbol_search" => {
+            let query = args["query"].as_str().context("missing query")?;
+            let search_path = args["path"].as_str().unwrap_or(cwd);
+            let kind = args["kind"].as_str().unwrap_or("all");
+            let glob_filter = args["glob"].as_str();
+            exec_symbol_search(query, kind, search_path, glob_filter, cwd)?
+        }
         "grep_search" => {
             let pattern = args["pattern"].as_str().context("missing pattern")?;
             let search_path = args["path"].as_str().unwrap_or(cwd);
@@ -1403,6 +1505,393 @@ fn search_tavily(
         out.push_str(&format!("- **{}** <{}>\n  {}\n", title, url, content));
     }
     Ok(out)
+}
+
+fn exec_project_summary(path: &Path) -> Result<String> {
+    let mut out = String::new();
+    let dir_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    out.push_str(&format!("Project: {}\n", dir_name));
+
+    let is_git = path.join(".git").exists();
+    if is_git {
+        out.push_str("VCS: git\n");
+    }
+
+    struct Marker {
+        file: &'static str,
+        lang: &'static str,
+        build: &'static str,
+    }
+    let markers = [
+        Marker {
+            file: "Cargo.toml",
+            lang: "Rust",
+            build: "cargo",
+        },
+        Marker {
+            file: "package.json",
+            lang: "JavaScript/TypeScript",
+            build: "npm/pnpm",
+        },
+        Marker {
+            file: "go.mod",
+            lang: "Go",
+            build: "go",
+        },
+        Marker {
+            file: "pyproject.toml",
+            lang: "Python",
+            build: "pip/poetry",
+        },
+        Marker {
+            file: "setup.py",
+            lang: "Python",
+            build: "setuptools",
+        },
+        Marker {
+            file: "Gemfile",
+            lang: "Ruby",
+            build: "bundler",
+        },
+        Marker {
+            file: "pom.xml",
+            lang: "Java",
+            build: "Maven",
+        },
+        Marker {
+            file: "build.gradle",
+            lang: "Java/Kotlin",
+            build: "Gradle",
+        },
+        Marker {
+            file: "CMakeLists.txt",
+            lang: "C/C++",
+            build: "CMake",
+        },
+        Marker {
+            file: "Makefile",
+            lang: "",
+            build: "make",
+        },
+        Marker {
+            file: "Package.swift",
+            lang: "Swift",
+            build: "SwiftPM",
+        },
+    ];
+
+    let mut langs: Vec<&str> = Vec::new();
+    let mut builds: Vec<&str> = Vec::new();
+    for m in &markers {
+        if path.join(m.file).exists() {
+            if !m.lang.is_empty() && !langs.contains(&m.lang) {
+                langs.push(m.lang);
+            }
+            if !builds.contains(&m.build) {
+                builds.push(m.build);
+            }
+        }
+    }
+
+    if !langs.is_empty() {
+        out.push_str(&format!("Languages: {}\n", langs.join(", ")));
+    }
+    if !builds.is_empty() {
+        out.push_str(&format!("Build system: {}\n", builds.join(", ")));
+    }
+
+    // Extract name/version from Cargo.toml or package.json if present.
+    if let Ok(cargo) = std::fs::read_to_string(path.join("Cargo.toml")) {
+        for line in cargo.lines().take(20) {
+            let trimmed = line.trim();
+            if trimmed.starts_with("name")
+                || trimmed.starts_with("version")
+                || trimmed.starts_with("description")
+            {
+                out.push_str(&format!("  {}\n", trimmed));
+            }
+        }
+        // List workspace members if present.
+        if let Some(idx) = cargo.find("[workspace]") {
+            for line in cargo[idx..].lines().skip(1).take(20) {
+                let t = line.trim();
+                if t.starts_with('[') && t != "[workspace]" {
+                    break;
+                }
+                if t.starts_with('"') || t.starts_with("members") {
+                    out.push_str(&format!("  {}\n", t));
+                }
+            }
+        }
+    }
+    if let Ok(pkg) = std::fs::read_to_string(path.join("package.json")) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&pkg) {
+            if let Some(name) = json["name"].as_str() {
+                out.push_str(&format!("  name: {}\n", name));
+            }
+            if let Some(ver) = json["version"].as_str() {
+                out.push_str(&format!("  version: {}\n", ver));
+            }
+        }
+    }
+
+    // Key directories (1 level).
+    let key_dirs: Vec<String> = std::fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flat_map(|rd| rd.filter_map(|e| e.ok()))
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            !n.starts_with('.') && n != "node_modules" && n != "target" && n != "__pycache__"
+        })
+        .collect();
+    if !key_dirs.is_empty() {
+        let mut sorted = key_dirs;
+        sorted.sort();
+        out.push_str(&format!("Directories: {}\n", sorted.join(", ")));
+    }
+
+    // Entry points.
+    let entry_candidates = [
+        "src/main.rs",
+        "src/lib.rs",
+        "src/index.ts",
+        "src/index.js",
+        "main.go",
+        "main.py",
+        "app.py",
+        "index.js",
+        "index.ts",
+    ];
+    let mut entries: Vec<&str> = Vec::new();
+    for e in &entry_candidates {
+        if path.join(e).exists() {
+            entries.push(e);
+        }
+    }
+    if !entries.is_empty() {
+        out.push_str(&format!("Entry points: {}\n", entries.join(", ")));
+    }
+
+    Ok(out)
+}
+
+fn exec_file_tree(root: &Path, max_depth: usize) -> Result<String> {
+    const SKIP_DIRS: &[&str] = &[
+        ".git",
+        "node_modules",
+        "target",
+        "__pycache__",
+        ".next",
+        "dist",
+        "build",
+        ".build",
+        ".cache",
+        "vendor",
+        ".bundle",
+        "venv",
+        ".venv",
+        "Pods",
+        "DerivedData",
+    ];
+    const MAX_ENTRIES: usize = 500;
+
+    let mut out = String::new();
+    let mut count = 0usize;
+
+    fn walk(
+        dir: &Path,
+        prefix: &str,
+        depth: usize,
+        max_depth: usize,
+        out: &mut String,
+        count: &mut usize,
+    ) {
+        if depth > max_depth || *count >= MAX_ENTRIES {
+            return;
+        }
+        let mut entries: Vec<(String, bool)> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    (name, is_dir)
+                })
+                .filter(|(name, _)| !name.starts_with('.') || name == ".github")
+                .collect(),
+            Err(_) => return,
+        };
+        entries.sort_by(|a, b| match (a.1, b.1) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        });
+
+        for (name, is_dir) in &entries {
+            if *count >= MAX_ENTRIES {
+                out.push_str(&format!("{}... (truncated)\n", prefix));
+                return;
+            }
+            *count += 1;
+            if *is_dir {
+                out.push_str(&format!("{}{}/\n", prefix, name));
+                if !SKIP_DIRS.contains(&name.as_str()) {
+                    walk(
+                        &dir.join(name),
+                        &format!("{}  ", prefix),
+                        depth + 1,
+                        max_depth,
+                        out,
+                        count,
+                    );
+                }
+            } else {
+                out.push_str(&format!("{}{}\n", prefix, name));
+            }
+        }
+    }
+
+    let root_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned());
+    out.push_str(&format!("{}/\n", root_name));
+    walk(root, "  ", 1, max_depth, &mut out, &mut count);
+    if count >= MAX_ENTRIES {
+        out.push_str(&format!("[truncated at {} entries]\n", MAX_ENTRIES));
+    }
+    Ok(out)
+}
+
+fn escape_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn exec_symbol_search(
+    query: &str,
+    kind: &str,
+    search_path: &str,
+    glob_filter: Option<&str>,
+    cwd: &str,
+) -> Result<String> {
+    let abs_path = resolve(search_path, cwd)?.to_string_lossy().into_owned();
+
+    // Build language-aware regex patterns for definitions.
+    let patterns: Vec<String> = match kind {
+        "function" => vec![
+            format!(r"(fn|function|def|func)\s+{}", escape_regex(query)),
+            format!(
+                r"(const|let|var)\s+{}\s*=\s*(async\s+)?\(",
+                escape_regex(query)
+            ),
+        ],
+        "type" => vec![format!(
+            r"(type|struct|enum|interface|typedef)\s+{}",
+            escape_regex(query)
+        )],
+        "class" => vec![format!(r"(class|struct)\s+{}", escape_regex(query))],
+        "method" => vec![
+            format!(r"(fn|def|func|function)\s+{}", escape_regex(query)),
+            format!(r"\.{}\s*=\s*function", escape_regex(query)),
+        ],
+        _ => vec![
+            format!(r"(fn|function|def|func)\s+{}", escape_regex(query)),
+            format!(
+                r"(const|let|var)\s+{}\s*=\s*(async\s+)?\(",
+                escape_regex(query)
+            ),
+            format!(
+                r"(type|struct|enum|interface|class|trait|typedef)\s+{}",
+                escape_regex(query)
+            ),
+            format!(r"(pub\s+)?(mod|module)\s+{}", escape_regex(query)),
+        ],
+    };
+
+    let combined = patterns.join("|");
+
+    // Use ripgrep if available, fall back to grep.
+    static HAS_RG: OnceLock<bool> = OnceLock::new();
+    let rg = *HAS_RG.get_or_init(|| {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    });
+
+    let mut cmd = if rg {
+        let mut c = std::process::Command::new("rg");
+        c.arg("--line-number")
+            .arg("--no-heading")
+            .arg("--color=never")
+            .arg("--max-count=50");
+        if let Some(g) = glob_filter {
+            c.arg("--glob").arg(g);
+        }
+        c.arg(&combined).arg(&abs_path);
+        c
+    } else {
+        let mut c = std::process::Command::new("grep");
+        c.arg("-rn").arg("--color=never").arg("-E");
+        if let Some(g) = glob_filter {
+            c.arg("--include").arg(g);
+        }
+        c.arg(&combined).arg(&abs_path);
+        c
+    };
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let output = cmd.output().context("symbol_search exec failed")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    if text.trim().is_empty() {
+        return Ok(format!("No symbol definitions found for '{}'.", query));
+    }
+
+    // Deduplicate and limit results.
+    let mut lines: Vec<&str> = text.lines().take(100).collect();
+    // Prefer lines that look like actual definitions (contain the query near a keyword).
+    lines.sort_by(|a, b| {
+        let a_has_kw = a.contains("fn ")
+            || a.contains("function ")
+            || a.contains("def ")
+            || a.contains("struct ")
+            || a.contains("class ")
+            || a.contains("type ")
+            || a.contains("enum ")
+            || a.contains("trait ")
+            || a.contains("interface ");
+        let b_has_kw = b.contains("fn ")
+            || b.contains("function ")
+            || b.contains("def ")
+            || b.contains("struct ")
+            || b.contains("class ")
+            || b.contains("type ")
+            || b.contains("enum ")
+            || b.contains("trait ")
+            || b.contains("interface ");
+        b_has_kw.cmp(&a_has_kw)
+    });
+
+    Ok(lines.join("\n"))
 }
 
 fn exec_grep_search(

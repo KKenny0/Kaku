@@ -65,6 +65,34 @@ pub(crate) fn build_cli_environment_message(cwd: &str) -> ApiMessage {
     if !cwd.is_empty() {
         s.push_str(&format!("Current directory: {}\n", cwd));
     }
+
+    // Auto-detect project context from marker files.
+    if !cwd.is_empty() {
+        let cwd_path = std::path::Path::new(cwd);
+        let mut project_hints: Vec<&str> = Vec::new();
+        if cwd_path.join("Cargo.toml").exists() {
+            project_hints.push("Rust (Cargo)");
+        }
+        if cwd_path.join("package.json").exists() {
+            project_hints.push("JS/TS (npm)");
+        }
+        if cwd_path.join("go.mod").exists() {
+            project_hints.push("Go");
+        }
+        if cwd_path.join("pyproject.toml").exists() || cwd_path.join("setup.py").exists() {
+            project_hints.push("Python");
+        }
+        if cwd_path.join("Makefile").exists() {
+            project_hints.push("Makefile");
+        }
+        if cwd_path.join(".git").exists() {
+            project_hints.push("git repo");
+        }
+        if !project_hints.is_empty() {
+            s.push_str(&format!("Project type: {}\n", project_hints.join(", ")));
+        }
+    }
+
     let memory = crate::soul::load_memory_for_env();
     if !memory.is_empty() {
         s.push_str(&format!(
@@ -90,9 +118,13 @@ pub(crate) fn tool_result_preview(tool_name: &str, result: &str) -> String {
             let n = result.lines().count();
             format!("{} lines", n)
         }
-        "grep_search" => {
+        "grep_search" | "symbol_search" => {
             let n = result.lines().filter(|l| !l.trim().is_empty()).count();
             format!("{} matches", n)
+        }
+        "project_summary" | "file_tree" => {
+            let n = result.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("{} lines", n)
         }
         "shell_exec" => {
             let first = result.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -149,8 +181,8 @@ pub(crate) fn run_agent(
     cancel: Arc<AtomicBool>,
     tx: Sender<StreamMsg>,
 ) {
-    const MAX_ROUNDS: usize = 15;
-    const SOFT_ROUND_WARN: usize = 12;
+    const MAX_ROUNDS: usize = 25;
+    const SOFT_ROUND_WARN: usize = 20;
     const MAX_HISTORY_BYTES: usize = 120_000;
 
     let outputs_dir = ai_conversations::conversations_dir()
@@ -309,7 +341,7 @@ pub(crate) fn run_agent(
     }
 
     let _ = tx.send(StreamMsg::Err(
-        "Hit the 15-round tool limit. The task may be partially complete. \
+        "Hit the 25-round tool limit. The task may be partially complete. \
          Type a follow-up to continue from where it left off."
             .to_string(),
     ));
