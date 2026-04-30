@@ -1522,22 +1522,20 @@ local function build_ai_generate_messages(query, cwd, git_branch, terminal_outpu
 end
 
 -- Animates or clears the inline spinner used during `#` AI command generation.
--- Pass clear=true to remove the spinner and commit `# query` as a permanent
--- screen line (cursor moves to the next line so ZLE redraws its prompt below,
--- leaving the query text visible above). Pass false/nil to draw/advance it.
---
--- Uses save/restore cursor (ESC[s / ESC[u) instead of \r\27[K so the PS1
--- path that precedes the `# query` buffer is never erased. The terminal
--- cursor is hidden (ESC[?25l) while the spinner is active.
+-- The spinner lives on a dedicated line below the `# query` buffer, with the
+-- cursor parked one row further down between frames. This avoids ESC[s/[u,
+-- which `zle reset-prompt` clobbered (causing the buffer text to disappear).
+-- Pass clear=true to erase the spinner row before injecting the command;
+-- pass false/nil to draw or advance the animation.
 local function ctrl_ai_generate_spinner(pane, pane_state, clear)
   if not pane_state then
     return
   end
   if clear then
     if pane_state.spinner_line_active then
-      -- Restore to saved position, clear the spinner, show cursor, then
-      -- advance to the next line so ZLE redraws its prompt below this one.
-      pcall(function() pane:inject_output("\27[u\27[K\27[?25h\r\n") end)
+      -- Cursor sits on the parking row. Move up to the spinner row and clear
+      -- it so zsh's prompt redraw (after \x15) can reuse this line.
+      pcall(function() pane:inject_output("\27[1A\r\27[K\27[?25h") end)
       pane_state.spinner_line_active = false
     end
     return
@@ -1547,19 +1545,24 @@ local function ctrl_ai_generate_spinner(pane, pane_state, clear)
   end
   local frames = { "◌", "◎", "◉", "●", "◉", "◎" }
   local n = #frames
+  local hint = "Generating command..."
+  local color_on = "\27[38;5;244m"
+  local color_off = "\27[0m"
   if not pane_state.spinner_line_active then
     local frame = frames[(pane_state.spinner_frame % n) + 1]
-    -- Hide cursor, save position (end of buffer), then append spinner.
     pcall(function()
-      pane:inject_output("\27[?25l\27[s \27[38;5;244m" .. frame .. "\27[0m")
+      pane:inject_output(
+        "\27[?25l\r\n " .. color_on .. frame .. color_off .. " " .. hint .. "\27[K\r\n"
+      )
     end)
     pane_state.spinner_line_active = true
   else
     pane_state.spinner_frame = (pane_state.spinner_frame + 1) % n
     local frame = frames[pane_state.spinner_frame + 1]
-    -- Restore to saved position, clear old spinner, draw new frame.
     pcall(function()
-      pane:inject_output("\27[u\27[K \27[38;5;244m" .. frame .. "\27[0m")
+      pane:inject_output(
+        "\27[1A\r\27[K " .. color_on .. frame .. color_off .. " " .. hint .. "\27[K\r\n"
+      )
     end)
   end
 end
