@@ -50,7 +50,17 @@ warn() { echo -e "${YELLOW}[nightly]${NC} $*"; }
 # Build
 if [[ "$UPLOAD_ONLY" -eq 0 ]]; then
     log "Building debug app bundle..."
-    PROFILE=debug CARGO_FEATURES="$FEATURES" ./scripts/build.sh --app-only 2>&1 | grep -v 'ranlib: warning:.*has no symbols' || true
+    # Filter the noisy ranlib warning, but preserve build.sh's exit code via
+    # PIPESTATUS — `| grep ... || true` would mask any build failure.
+    set +e
+    PROFILE=debug CARGO_FEATURES="$FEATURES" ./scripts/build.sh --app-only 2>&1 \
+        | grep -v 'ranlib: warning:.*has no symbols'
+    BUILD_STATUS=${PIPESTATUS[0]}
+    set -e
+    if [[ "$BUILD_STATUS" -ne 0 ]]; then
+        echo "build.sh failed with exit code $BUILD_STATUS" >&2
+        exit "$BUILD_STATUS"
+    fi
     log "Build complete: $OUT_DIR/Kaku.app"
 fi
 
