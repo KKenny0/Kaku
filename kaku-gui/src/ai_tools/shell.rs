@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -92,6 +93,15 @@ pub(super) fn exec_shell_exec(
         .unwrap_or(0);
     let cwd_tmp_path =
         std::env::temp_dir().join(format!("kaku_cwd_{}_{}.txt", std::process::id(), ts));
+    // create_new + mode 0o600 ensures we own the file exclusively before the shell writes to it.
+    // Propagate on failure: an EEXIST or symlink collision here would allow the shell redirection
+    // to follow a pre-placed symlink, turning this into a write-anywhere primitive.
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&cwd_tmp_path)
+        .with_context(|| format!("could not create temp cwd file {}", cwd_tmp_path.display()))?;
     let wrapped = format!(
         "{}; __kaku_rc=$?; printf '%s' \"$(pwd)\" > {}; exit $__kaku_rc",
         command,

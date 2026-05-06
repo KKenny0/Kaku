@@ -167,6 +167,7 @@ fn evict_excess(idx: &mut IndexFile, dir: &Path) {
             Some(pos) => {
                 let removed = idx.conversations.remove(pos);
                 let _ = std::fs::remove_file(conversation_path(dir, &removed.id));
+                let _ = std::fs::remove_dir_all(dir.join(&removed.id));
             }
             None => break, // only the active remains, nothing left to evict
         }
@@ -466,8 +467,12 @@ mod tests {
             conversations,
         };
 
-        // Create a dummy file for "id-000" so remove_file finds it.
+        // Create persisted data for "id-000" so eviction removes both the
+        // conversation JSON and the sidecar tool output directory.
         std::fs::write(conversation_path(&dir_path, "id-000"), "{}").unwrap();
+        let tool_dir = dir_path.join("id-000").join("tool_outputs");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("r1-0.txt"), "tool output").unwrap();
 
         evict_excess(&mut idx, &dir_path);
 
@@ -475,6 +480,8 @@ mod tests {
         assert!(idx.conversations.iter().any(|e| e.id == active_id));
         // id-000 had updated_at=0, should be evicted.
         assert!(!idx.conversations.iter().any(|e| e.id == "id-000"));
+        assert!(!conversation_path(&dir_path, "id-000").exists());
+        assert!(!dir_path.join("id-000").exists());
         // id-001 stays.
         assert!(idx.conversations.iter().any(|e| e.id == "id-001"));
     }

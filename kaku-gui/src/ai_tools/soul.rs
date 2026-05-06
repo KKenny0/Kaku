@@ -1,6 +1,8 @@
 //! Memory, soul, onboarding, and spill-file helpers.
 
 use anyhow::Result;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 /// Path to the per-user memory file shared between the overlay and the CLI curator.
@@ -83,7 +85,13 @@ pub(super) fn truncate_and_spill(result: String, cap: usize) -> Result<String> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let note = if std::fs::write(&tmp_path, result.as_bytes()).is_ok() {
+    let write_result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&tmp_path)
+        .and_then(|mut file| file.write_all(result.as_bytes()));
+    let note = if write_result.is_ok() {
         if let Ok(mut registry) = SPILL_FILES.lock() {
             registry.push(tmp_path.clone());
         }

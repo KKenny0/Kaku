@@ -58,6 +58,67 @@ pub(crate) fn resolve(path: &str, cwd: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Relative tool paths must stay inside the current project. Absolute and
+/// `~/` paths remain explicit opt-ins, but `../../…` should not quietly mutate
+/// files outside the pane's cwd while the approval prompt shows a relative path.
+pub(crate) fn reject_relative_cwd_escape(raw_path: &str, resolved: &Path, cwd: &str) -> Result<()> {
+    if raw_path.starts_with('/') || raw_path.starts_with("~/") || raw_path == "~" {
+        return Ok(());
+    }
+
+    let canon_cwd =
+        std::fs::canonicalize(cwd).with_context(|| format!("resolve working directory '{cwd}'"))?;
+    if let Ok(canon_path) = std::fs::canonicalize(resolved) {
+        if !canon_path.starts_with(&canon_cwd) {
+            anyhow::bail!(
+                "path '{}' resolves outside the working directory; \
+                 use an absolute path to access it",
+                raw_path
+            );
+        }
+        return Ok(());
+    }
+
+    let mut existing = resolved.to_path_buf();
+    while !existing.exists() {
+        if !existing.pop() {
+            break;
+        }
+    }
+    if existing.exists() {
+        let canon_existing = std::fs::canonicalize(&existing)
+            .with_context(|| format!("resolve '{}'", existing.display()))?;
+        if !canon_existing.starts_with(&canon_cwd) {
+            anyhow::bail!(
+                "path '{}' resolves outside the working directory; \
+                 use an absolute path to access it",
+                raw_path
+            );
+        }
+    }
+
+    let mut lexical = canon_cwd.clone();
+    for component in Path::new(raw_path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => lexical.push(part),
+            std::path::Component::ParentDir => {
+                lexical.pop();
+                if !lexical.starts_with(&canon_cwd) {
+                    anyhow::bail!(
+                        "path '{}' resolves outside the working directory; \
+                         use an absolute path to access it",
+                        raw_path
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +161,27 @@ mod tests {
     fn reject_if_sensitive_allows_normal_paths() {
         // /tmp is not in the blocked list; resolve_if_sensitive must Ok it.
         assert!(reject_if_sensitive(&PathBuf::from("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn relative_cwd_escape_rejects_parent_traversal_outside_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let raw = "../outside.txt";
+        let resolved = resolve(raw, cwd.to_str().unwrap()).unwrap();
+        let err = reject_relative_cwd_escape(raw, &resolved, cwd.to_str().unwrap())
+            .expect_err("must reject cwd escape");
+        assert!(err.to_string().contains("outside the working directory"));
+    }
+
+    #[test]
+    fn relative_cwd_escape_allows_nested_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let raw = "src/generated/file.txt";
+        let resolved = resolve(raw, cwd.to_str().unwrap()).unwrap();
+        reject_relative_cwd_escape(raw, &resolved, cwd.to_str().unwrap()).unwrap();
     }
 }

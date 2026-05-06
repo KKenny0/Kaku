@@ -197,6 +197,7 @@ mod tests {
             chat_model: "test".to_string(),
             chat_model_choices: vec![],
             base_url: "https://example.com".to_string(),
+            custom_headers: vec![],
             provider: "Custom".to_string(),
             auth_type: "api_key".to_string(),
             chat_tools_enabled: false,
