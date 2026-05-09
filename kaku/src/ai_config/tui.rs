@@ -2728,6 +2728,35 @@ fn parse_custom_headers_toml(value: Option<&toml::Value>) -> Vec<String> {
     }
 }
 
+fn normalize_exit_codes(values: Vec<i32>) -> Vec<i32> {
+    let mut dedup = HashSet::new();
+    let mut out: Vec<i32> = values
+        .into_iter()
+        .filter(|code| *code >= 0)
+        .filter(|code| dedup.insert(*code))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+fn parse_exit_codes_toml(value: Option<&toml::Value>) -> Vec<i32> {
+    match value {
+        Some(toml::Value::Array(items)) => normalize_exit_codes(
+            items
+                .iter()
+                .filter_map(|v| v.as_integer())
+                .filter_map(|v| i32::try_from(v).ok())
+                .collect(),
+        ),
+        Some(toml::Value::String(raw)) => normalize_exit_codes(
+            raw.split(',')
+                .filter_map(|part| part.trim().parse::<i32>().ok())
+                .collect(),
+        ),
+        _ => vec![],
+    }
+}
+
 /// Configuration for the Kaku built-in AI assistant.
 ///
 /// This struct holds the configuration for Kaku's AI-powered command analysis
@@ -2753,6 +2782,8 @@ struct KakuAssistantConfig {
     /// Optional curated chat-overlay model list. Round-tripped through the TUI
     /// to avoid losing user choices made via direct edits or the GUI.
     chat_model_choices: Vec<String>,
+    /// Exit codes that should not trigger automatic command-fix suggestions.
+    auto_fix_ignored_exit_codes: Vec<i32>,
     /// Web search backend: "none" (disabled), "brave", "pipellm", or "tavily".
     web_search_provider: String,
     /// API key for the web search provider (empty = not configured).
@@ -2793,6 +2824,7 @@ impl KakuAssistantConfig {
             custom_headers: vec![],
             chat_model: String::new(),
             chat_model_choices: Vec::new(),
+            auto_fix_ignored_exit_codes: Vec::new(),
             web_search_provider: "none".to_string(),
             web_search_api_key: String::new(),
         }
@@ -2867,6 +2899,10 @@ impl KakuAssistantConfig {
         &self.chat_model_choices
     }
 
+    fn auto_fix_ignored_exit_codes(&self) -> &[i32] {
+        &self.auto_fix_ignored_exit_codes
+    }
+
     /// Carry over the chat-overlay model choices from another config.
     ///
     /// The TUI edits `chat_model`, but not the curated `chat_model_choices`;
@@ -2885,6 +2921,11 @@ impl KakuAssistantConfig {
     /// explicitly, including clearing it to empty.
     fn with_chat_model_choices_passthrough(mut self, src: &KakuAssistantConfig) -> Self {
         self.chat_model_choices = src.chat_model_choices.clone();
+        self
+    }
+
+    fn with_auto_fix_ignored_exit_codes(mut self, exit_codes: Vec<i32>) -> Self {
+        self.auto_fix_ignored_exit_codes = normalize_exit_codes(exit_codes);
         self
     }
 }
@@ -2921,6 +2962,8 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
         .and_then(|v| v.as_str())
         .unwrap_or("api_key");
     let custom_headers = parse_custom_headers_toml(parsed.get("custom_headers"));
+    let auto_fix_ignored_exit_codes =
+        parse_exit_codes_toml(parsed.get("auto_fix_ignored_exit_codes"));
 
     let web_search_provider = parsed
         .get("web_search_provider")
@@ -2975,6 +3018,7 @@ fn parse_kaku_assistant_config(raw: &str) -> KakuAssistantConfig {
 
     let mut cfg = KakuAssistantConfig::new(enabled, api_key, simple_model, base_url)
         .with_custom_headers(custom_headers)
+        .with_auto_fix_ignored_exit_codes(auto_fix_ignored_exit_codes)
         .with_web_search(web_search_provider, web_search_api_key);
     cfg.auth_type = stored_auth_type.to_string();
     cfg.chat_model = deep_model;
@@ -3273,6 +3317,9 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
     out.push_str(
         "# chat_model: Deep Model for Cmd+L, k, and tool-using chat. Omit to reuse model.\n",
     );
+    out.push_str(
+        "# auto_fix_ignored_exit_codes: optional exit codes that should not trigger automatic command-fix suggestions.\n",
+    );
     out.push_str("# base_url: chat-completions API root URL.\n");
     out.push_str(
         "# custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n",
@@ -3311,6 +3358,15 @@ fn write_kaku_assistant_config(path: &Path, cfg: &KakuAssistantConfig) -> anyhow
                 .collect(),
         );
         out.push_str(&format!("chat_model_choices = {}\n", arr));
+    }
+    if !cfg.auto_fix_ignored_exit_codes().is_empty() {
+        let arr = toml::Value::Array(
+            cfg.auto_fix_ignored_exit_codes()
+                .iter()
+                .map(|item| toml::Value::Integer(i64::from(*item)))
+                .collect(),
+        );
+        out.push_str(&format!("auto_fix_ignored_exit_codes = {}\n", arr));
     }
     out.push_str(&format!(
         "base_url = {}\n",
@@ -3498,6 +3554,7 @@ fn save_kaku_assistant_field_to_path(
     } else {
         cfg.auth_type().to_string()
     };
+    updated.auto_fix_ignored_exit_codes = cfg.auto_fix_ignored_exit_codes().to_vec();
 
     write_kaku_assistant_config(path, &updated)
 }
@@ -7217,6 +7274,42 @@ provider = "managed:kimi-code"
         let cfg2 = parse_kaku_assistant_config(&saved);
         assert_eq!(cfg2.chat_model(), "gpt-5.4");
         assert_eq!(cfg2.chat_model_choices(), &["gpt-5.4", "claude-sonnet-4-6"]);
+    }
+
+    #[test]
+    fn kaku_assistant_auto_fix_ignored_exit_codes_parse_and_normalize() {
+        let cfg = parse_kaku_assistant_config(
+            "enabled = true\nmodel = \"gpt-5.4-mini\"\nauto_fix_ignored_exit_codes = [2, -1, 2, 130]\n",
+        );
+        assert_eq!(cfg.auto_fix_ignored_exit_codes(), &[2, 130]);
+
+        let cfg = parse_kaku_assistant_config(
+            "enabled = true\nmodel = \"gpt-5.4-mini\"\nauto_fix_ignored_exit_codes = \"2,nope,-1,2\"\n",
+        );
+        assert_eq!(cfg.auto_fix_ignored_exit_codes(), &[2]);
+
+        let cfg = parse_kaku_assistant_config("enabled = true\nmodel = \"gpt-5.4-mini\"\n");
+        assert!(cfg.auto_fix_ignored_exit_codes().is_empty());
+    }
+
+    #[test]
+    fn kaku_assistant_save_preserves_auto_fix_ignored_exit_codes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assistant.toml");
+        std::fs::write(
+            &path,
+            "enabled = true\nmodel = \"gpt-5.4-mini\"\nauto_fix_ignored_exit_codes = [2]\nbase_url = \"https://api.openai.com/v1\"\n",
+        )
+        .expect("write temp config");
+
+        save_kaku_assistant_field_to_path(&path, "Base URL", "https://proxy.example.com/v1")
+            .expect("save base url");
+        let saved = std::fs::read_to_string(&path).expect("read saved");
+        assert!(
+            saved.contains("auto_fix_ignored_exit_codes = [2]"),
+            "ignored exit codes must round-trip through TUI saves: {}",
+            saved
+        );
     }
 
     #[test]

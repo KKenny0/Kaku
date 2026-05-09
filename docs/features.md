@@ -63,6 +63,7 @@ The config lives at `~/.config/kaku/assistant.toml`:
 | `model` | Simple Model for `#` command generation, command fixes, and lightweight chat |
 | `chat_model` | Deep Model for primary `Cmd + L` / `k` chat and tool use |
 | `chat_model_choices` | Optional curated list of chat models for the overlay picker |
+| `auto_fix_ignored_exit_codes` | Optional exit codes that should not trigger automatic command-fix suggestions, e.g. `[2]` |
 | `base_url` | OpenAI-compatible API root URL |
 | `custom_headers` | Extra HTTP headers for enterprise proxies, e.g. `["X-Customer-ID: your-id"]` |
 | `web_search_provider` | Optional search backend: `brave`, `pipellm`, or `tavily` |

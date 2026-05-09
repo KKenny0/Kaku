@@ -128,6 +128,9 @@ pub fn default_assistant_toml_template() -> String {
 #                     Kaku skips auto-fetching from /models and cycles only\n\
 #                     through these entries.\n\
 #                     example: [\"gpt-5.4\", \"gpt-5.4-mini\", \"claude-sonnet-4-6\"]\n\
+# auto_fix_ignored_exit_codes: optional exit codes that should not trigger\n\
+#                              automatic command-fix suggestions.\n\
+#                              example: [2]\n\
 # base_url: chat-completions API root URL.\n\
 # custom_headers: optional extra HTTP headers for enterprise proxies or API gateways.\n\
 #                 format: [\"Header-Name: value\", \"Another-Header: value\"]\n\
@@ -137,6 +140,7 @@ enabled = true\n\
 # api_key = \"<your_api_key>\"\n\
 model = \"{DEFAULT_MODEL}\"\n\
 chat_model = \"{DEFAULT_CHAT_MODEL}\"\n\
+# auto_fix_ignored_exit_codes = []\n\
 base_url = \"{DEFAULT_BASE_URL}\"\n\
 # custom_headers = [\"X-Customer-ID: your-customer-id\"]\n\
 # web_search_provider: optional web search backend for the chat agent.\n\

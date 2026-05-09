@@ -576,6 +576,28 @@ local function parse_ai_toml_setting_value(raw_value)
   return strip_wrapping_quotes(value)
 end
 
+local function parse_ai_toml_int_set(raw_value)
+  local value = trim_surrounding_whitespace(raw_value or "")
+  local set = {}
+  if value == "" then
+    return set
+  end
+
+  if value:sub(1, 1) == "[" and value:sub(-1) == "]" then
+    value = value:sub(2, -2)
+  end
+
+  for part in value:gmatch("[^,]+") do
+    local token = strip_wrapping_quotes(part)
+    local number = tonumber(token)
+    if number and number >= 0 and number == math.floor(number) then
+      set[number] = true
+    end
+  end
+
+  return set
+end
+
 local function parse_ai_toml_custom_headers(raw_value)
   local value = trim_surrounding_whitespace(raw_value or "")
   if value == "" then
@@ -669,6 +691,8 @@ local function load_ai_fix_file_settings()
           local parsed = nil
           if key == "custom_headers" then
             parsed = parse_ai_toml_custom_headers(raw_value)
+          elseif key == "auto_fix_ignored_exit_codes" then
+            parsed = parse_ai_toml_int_set(raw_value)
           else
             parsed = parse_ai_toml_setting_value(raw_value)
           end
@@ -765,6 +789,14 @@ local function read_ai_custom_headers(file_key)
   return headers
 end
 
+local function read_ai_int_set(file_key)
+  local raw_set = ai_fix_file_settings[file_key]
+  if type(raw_set) ~= "table" then
+    return {}
+  end
+  return raw_set
+end
+
 -- Detect if the foreground process is a shell.
 -- Returns false for interactive programs like claude, vim, ssh.
 local function is_shell_foreground(pane)
@@ -794,6 +826,7 @@ local ai_fix_custom_headers = {}
 local ai_fix_proxy = nil
 local ai_fix_timeout_secs = 30
 local ai_fix_debug_enabled = false
+local ai_fix_ignored_exit_codes = {}
 local ai_fix_state_by_pane = {}
 local ai_fix_poll_interval_secs = 0.2
 local ai_fix_poll_deadline_secs = ai_fix_timeout_secs + 4
@@ -833,6 +866,7 @@ local function refresh_ai_fix_settings()
     ai_fix_poll_deadline_secs = ai_fix_timeout_secs + 4
   end
   ai_fix_debug_enabled = read_ai_setting("debug", "0") ~= "0"
+  ai_fix_ignored_exit_codes = read_ai_int_set("auto_fix_ignored_exit_codes")
 end
 
 local function detect_git_branch(path)
@@ -1236,6 +1270,10 @@ end
 local function should_skip_ai_fix_for_failed_command(failed_command, exit_code)
   local normalized = trim_surrounding_whitespace(failed_command or "")
   if normalized == "" then
+    return true
+  end
+
+  if ai_fix_ignored_exit_codes[exit_code] then
     return true
   end
 
@@ -3305,6 +3343,7 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
     ai_debug_log("user-var-changed ignored missing kaku_last_cmd")
     return
   end
+  refresh_ai_fix_settings()
   if should_skip_ai_fix_for_failed_command(failed_command, exit_code) then
     ai_debug_log("user-var-changed skipped by non-error command policy")
     return
@@ -3324,7 +3363,6 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   pane_state.failed_command = failed_command
   pane_state.exit_code = exit_code
 
-  refresh_ai_fix_settings()
   if not ai_fix_enabled then
     ai_debug_log("user-var-changed ai_fix disabled after refresh")
     return
@@ -3958,6 +3996,13 @@ local kaku_light = {
     ['#1C6C66'] = '#F2F0EB',  -- ANSI 6 (cyan bg): branch pill
     ['#536907'] = '#F2F0EB',  -- ANSI 2 (green bg): progress bar blocks
     ['#8E6B02'] = '#F2F0EB',  -- ANSI 3 (yellow bg): agent label background
+  },
+
+  -- Override pale agent text that is readable on dark themes but nearly
+  -- invisible against Kaku Light's cream background.
+  foreground_color_overrides = {
+    ['#FFFFDB'] = '#575653',  -- Hermes pale yellow text
+    ['#FFFFDC'] = '#575653',  -- Hermes pale yellow text variant
   },
 }
 

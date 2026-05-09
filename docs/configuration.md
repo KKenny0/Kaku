@@ -48,11 +48,15 @@ config.color_scheme = "Kaku Light"  -- always light
 
 **Color overrides**
 
-Remap specific hex colors to keep theme consistency with apps that output their own colors:
+Remap specific hex colors to keep theme consistency with apps that output their own colors. `color_overrides` applies to rendered backgrounds, including palette-backed ANSI backgrounds and truecolor backgrounds. `foreground_color_overrides` applies only to truecolor text:
 
 ```lua
 config.color_overrides = {
   ['#6E6E6E'] = '#3A3942',
+}
+
+config.foreground_color_overrides = {
+  ['#FFFFDB'] = '#575653',
 }
 ```
 

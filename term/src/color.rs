@@ -57,9 +57,12 @@ pub struct ColorPalette {
     pub selection_bg: SrgbaTuple,
     pub scrollbar_thumb: SrgbaTuple,
     pub split: SrgbaTuple,
-    /// Map true colors to replacement colors
+    /// Map rendered background colors to replacement colors.
     #[cfg_attr(feature = "use_serde", serde(default))]
     pub color_overrides: HashMap<SrgbaTuple, SrgbaTuple>,
+    /// Map true color foregrounds to replacement colors.
+    #[cfg_attr(feature = "use_serde", serde(default))]
+    pub foreground_color_overrides: HashMap<SrgbaTuple, SrgbaTuple>,
 }
 
 impl fmt::Debug for Palette256 {
@@ -73,7 +76,10 @@ impl fmt::Debug for Palette256 {
 }
 
 impl ColorPalette {
-    fn apply_override(&self, color: SrgbaTuple) -> SrgbaTuple {
+    fn apply_override(
+        color_overrides: &HashMap<SrgbaTuple, SrgbaTuple>,
+        color: SrgbaTuple,
+    ) -> SrgbaTuple {
         // Convert to 8-bit RGB for comparison to avoid floating point precision issues
         let to_u8 = |f: f32| (f * 255.0).round() as u8;
         let (r, g, b, _) = (
@@ -83,7 +89,7 @@ impl ColorPalette {
             to_u8(color.3),
         );
 
-        for (from, to) in &self.color_overrides {
+        for (from, to) in color_overrides {
             let (fr, fg, fb, _) = (to_u8(from.0), to_u8(from.1), to_u8(from.2), to_u8(from.3));
             if r == fr && g == fg && b == fb {
                 return *to;
@@ -97,15 +103,21 @@ impl ColorPalette {
             ColorAttribute::Default => self.foreground,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
-            | ColorAttribute::TrueColorWithDefaultFallback(color) => color,
+            | ColorAttribute::TrueColorWithDefaultFallback(color) => {
+                Self::apply_override(&self.foreground_color_overrides, color)
+            }
         }
     }
     pub fn resolve_bg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.background,
-            ColorAttribute::PaletteIndex(idx) => self.apply_override(self.colors.0[idx as usize]),
+            ColorAttribute::PaletteIndex(idx) => {
+                Self::apply_override(&self.color_overrides, self.colors.0[idx as usize])
+            }
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
-            | ColorAttribute::TrueColorWithDefaultFallback(color) => self.apply_override(color),
+            | ColorAttribute::TrueColorWithDefaultFallback(color) => {
+                Self::apply_override(&self.color_overrides, color)
+            }
         }
     }
 }
@@ -213,6 +225,53 @@ impl ColorPalette {
             scrollbar_thumb,
             split,
             color_overrides: HashMap::new(),
+            foreground_color_overrides: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgb(r: u8, g: u8, b: u8) -> SrgbaTuple {
+        RgbColor::new_8bpc(r, g, b).into()
+    }
+
+    #[test]
+    fn foreground_override_applies_only_to_truecolor_foreground() {
+        let mut palette = ColorPalette::default();
+        let pale = rgb(0xff, 0xff, 0xdb);
+        let readable = rgb(0x57, 0x56, 0x53);
+        let background = rgb(0xf2, 0xf0, 0xeb);
+        palette.foreground_color_overrides.insert(pale, readable);
+        palette.color_overrides.insert(pale, background);
+
+        assert_eq!(
+            palette.resolve_fg(ColorAttribute::TrueColorWithDefaultFallback(pale)),
+            readable
+        );
+        assert_eq!(
+            palette.resolve_bg(ColorAttribute::TrueColorWithDefaultFallback(pale)),
+            background
+        );
+    }
+
+    #[test]
+    fn foreground_override_does_not_change_default_or_ansi_foreground() {
+        let mut palette = ColorPalette::default();
+        let ansi_yellow = palette.colors.0[AnsiColor::Yellow as usize];
+        palette
+            .foreground_color_overrides
+            .insert(ansi_yellow, rgb(0x57, 0x56, 0x53));
+
+        assert_eq!(
+            palette.resolve_fg(ColorAttribute::Default),
+            palette.foreground
+        );
+        assert_eq!(
+            palette.resolve_fg(ColorAttribute::PaletteIndex(AnsiColor::Yellow as u8)),
+            ansi_yellow
+        );
     }
 }

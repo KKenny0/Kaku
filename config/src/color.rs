@@ -183,11 +183,16 @@ pub struct Palette {
     pub launcher_label_fg: Option<ColorSpec>,
     pub launcher_label_bg: Option<ColorSpec>,
 
-    /// Map true colors to replacement colors.
-    /// This is useful for overriding colors that applications output via
-    /// 24-bit true color escape sequences.
+    /// Map rendered background colors to replacement colors.
+    /// This is useful for overriding background colors that applications output
+    /// via palette indexes or 24-bit true color escape sequences.
     #[dynamic(default)]
     pub color_overrides: HashMap<RgbaColor, RgbaColor>,
+    /// Map true color foregrounds to replacement colors.
+    /// This is useful for overriding text colors that applications output via
+    /// 24-bit true color escape sequences.
+    #[dynamic(default)]
+    pub foreground_color_overrides: HashMap<RgbaColor, RgbaColor>,
 }
 impl_lua_conversion_dynamic!(Palette);
 
@@ -248,6 +253,13 @@ impl Palette {
                 }
                 map
             },
+            foreground_color_overrides: {
+                let mut map = self.foreground_color_overrides.clone();
+                for (k, v) in &other.foreground_color_overrides {
+                    map.insert(*k, *v);
+                }
+                map
+            },
         }
     }
 }
@@ -288,6 +300,9 @@ impl From<ColorPalette> for Palette {
 
         for (&from, &to) in &cp.color_overrides {
             p.color_overrides.insert(from.into(), to.into());
+        }
+        for (&from, &to) in &cp.foreground_color_overrides {
+            p.foreground_color_overrides.insert(from.into(), to.into());
         }
 
         p
@@ -337,6 +352,9 @@ impl From<Palette> for ColorPalette {
         }
         for (&from, &to) in &cfg.color_overrides {
             p.color_overrides.insert(from.into(), to.into());
+        }
+        for (&from, &to) in &cfg.foreground_color_overrides {
+            p.foreground_color_overrides.insert(from.into(), to.into());
         }
         p
     }
@@ -837,4 +855,21 @@ brights = [ "#8ca6a6" ,"#e5164a" ,"#00b368" ,"#b3694d" ,"#0094f0" ,"#ff5792" ,"#
         scheme.colors.indexed.get(&52),
         Some(&RgbColor::new_8bpc(0xfb, 0xda, 0xda).into())
     );
+}
+
+#[test]
+fn foreground_color_overrides_convert_to_term_palette() {
+    let pale: RgbaColor = RgbColor::new_8bpc(0xff, 0xff, 0xdb).into();
+    let readable: RgbaColor = RgbColor::new_8bpc(0x57, 0x56, 0x53).into();
+    let mut palette = Palette::default();
+    palette.foreground_color_overrides.insert(pale, readable);
+
+    let term_palette: ColorPalette = palette.into();
+    let pale_key: SrgbaTuple = pale.into();
+    let readable_value: SrgbaTuple = readable.into();
+    assert_eq!(
+        term_palette.foreground_color_overrides.get(&pale_key),
+        Some(&readable_value)
+    );
+    assert!(term_palette.color_overrides.is_empty());
 }
