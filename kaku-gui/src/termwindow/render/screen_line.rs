@@ -39,6 +39,15 @@ fn uses_full_cell_block_cursor(render_shape: CursorShape, effective_shape: Curso
         ))
 }
 
+fn cursor_render_layer(shape: CursorShape) -> usize {
+    match shape {
+        // Bar cursors are narrow enough to share the background layer. Keeping
+        // them below glyphs avoids covering the leading pixels of small fonts.
+        CursorShape::BlinkingBar | CursorShape::SteadyBar => 0,
+        _ => 0,
+    }
+}
+
 impl crate::TermWindow {
     /// "Render" a line of the terminal screen into the vertex buffer.
     /// This is nominally a matter of setting the fg/bg color and the
@@ -351,10 +360,7 @@ impl crate::TermWindow {
                     .effective_shape(params.cursor.shape);
                 let full_cell_block_cursor =
                     uses_full_cell_block_cursor(shape, effective_cursor_shape);
-                let cursor_layer = match shape {
-                    CursorShape::BlinkingBar | CursorShape::SteadyBar => 2,
-                    _ => 0,
-                };
+                let cursor_layer = cursor_render_layer(shape);
                 let mut quad = layers
                     .allocate(cursor_layer)
                     .with_context(|| format!("layers.allocate({cursor_layer})"))?;
@@ -412,12 +418,7 @@ impl crate::TermWindow {
                                 )
                             }
                             CursorShape::BlinkingBar | CursorShape::SteadyBar => {
-                                // Shorten the bar cursor to ~75% of cell height and
-                                // vertically center it so it aligns with the text
-                                // x-height rather than stretching from the very top
-                                // to the very bottom of the cell.
-                                let inset = (cell_height * 0.125).round();
-                                (pos_y + inset, pos_y + cell_height - inset)
+                                (pos_y, pos_y + cell_height)
                             }
                             _ => (pos_y, pos_y + cell_height),
                         }
@@ -946,7 +947,7 @@ impl crate::TermWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{block_cursor_vertical_bounds, uses_full_cell_block_cursor};
+    use super::{block_cursor_vertical_bounds, cursor_render_layer, uses_full_cell_block_cursor};
     use termwiz::surface::CursorShape;
 
     #[test]
@@ -987,5 +988,11 @@ mod tests {
             CursorShape::SteadyBar,
             CursorShape::SteadyBar,
         ));
+    }
+
+    #[test]
+    fn bar_cursor_renders_below_glyphs() {
+        assert_eq!(cursor_render_layer(CursorShape::BlinkingBar), 0);
+        assert_eq!(cursor_render_layer(CursorShape::SteadyBar), 0);
     }
 }
