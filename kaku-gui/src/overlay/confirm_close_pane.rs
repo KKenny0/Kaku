@@ -12,7 +12,10 @@ pub fn confirm_close_pane(
     mux_window_id: WindowId,
     window: ::window::Window,
 ) -> anyhow::Result<()> {
-    if confirm::run_confirmation(&rust_i18n::t!("overlay.confirm_close.pane"), &mut term)? {
+    if confirm::run_confirmation(
+        "Close this pane?\nThe running process in this pane will be terminated.",
+        &mut term,
+    )? {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
             let tab = match mux.get_active_tab_for_window(mux_window_id) {
@@ -34,7 +37,10 @@ pub fn confirm_close_tab(
     _mux_window_id: WindowId,
     window: ::window::Window,
 ) -> anyhow::Result<()> {
-    if confirm::run_confirmation(&rust_i18n::t!("overlay.confirm_close.tab"), &mut term)? {
+    if confirm::run_confirmation(
+        "Close this tab?\nAll panes in this tab will be terminated.",
+        &mut term,
+    )? {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
             mux.remove_tab(tab_id);
@@ -53,7 +59,10 @@ pub fn confirm_close_window(
     window: ::window::Window,
     tab_id: TabId,
 ) -> anyhow::Result<()> {
-    if confirm::run_confirmation(&rust_i18n::t!("overlay.confirm_close.window"), &mut term)? {
+    if confirm::run_confirmation(
+        "Close this window?\nAll tabs and panes in this window will be terminated.",
+        &mut term,
+    )? {
         promise::spawn::spawn_into_main_thread(async move {
             let mux = Mux::get();
             mux.kill_window(mux_window_id);
@@ -70,7 +79,10 @@ pub fn confirm_quit_program(
     window: ::window::Window,
     tab_id: TabId,
 ) -> anyhow::Result<()> {
-    if confirm::run_confirmation(&rust_i18n::t!("overlay.confirm_close.quit"), &mut term)? {
+    if confirm::run_confirmation(
+        "Quit Kaku?\nAll open tabs and panes will be closed.",
+        &mut term,
+    )? {
         promise::spawn::spawn_into_main_thread(async move {
             #[cfg(target_os = "macos")]
             {

@@ -404,10 +404,10 @@ impl LauncherState {
         // the first numeric shortcut from tabs or primary launcher commands.
         if !args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
             self.entries.push(Entry {
-                label: rust_i18n::t!("overlay.launcher.pane_encoding").into_owned(),
+                label: "Pane Encoding".to_string(),
                 action: KeyAssignment::ShowLauncherArgs(LauncherActionArgs {
                     flags: LauncherFlags::PANE_ENCODINGS,
-                    title: Some(rust_i18n::t!("overlay.launcher.pane_encoding").into_owned()),
+                    title: Some("Pane Encoding".to_string()),
                     help_text: None,
                     fuzzy_help_text: None,
                     alphabet: None,
@@ -604,7 +604,8 @@ impl LauncherState {
                 action: SetPaneEncoding(encoding),
             });
         }
-        self.help_text = rust_i18n::t!("overlay.launcher.pane_encoding_help").into_owned();
+        self.help_text =
+            "Select encoding  |  Enter = set  |  Esc = back  |  / = filter".to_string();
         self.active_idx = 0;
         self.top_row = 0;
         self.filtering = false;
