@@ -75,6 +75,20 @@ pub fn staged_update_available() -> Option<StagedUpdateInfo> {
     if !app.exists() {
         return None;
     }
+    // A staged update whose version is not newer than what we're running is
+    // stale: the update was already applied but the post-update marker
+    // cleanup never ran. Drop it so the menu stops offering a pointless
+    // "Restart to Update", and so update_checker's startup cleanup removes
+    // the directory.
+    if !is_newer(&info.tag, wezterm_version()) {
+        log::info!(
+            "staged update {} is not newer than current {}, removing",
+            info.tag,
+            wezterm_version()
+        );
+        cleanup_staged_update();
+        return None;
+    }
     // Check expiry.
     let now = now_unix_secs();
     if now.saturating_sub(info.staged_at) > STAGED_MAX_AGE_SECS {
