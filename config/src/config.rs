@@ -571,6 +571,16 @@ pub struct Config {
     #[dynamic(default)]
     pub selection_wheel_scroll_behavior: SelectionWheelScrollBehavior,
 
+    /// Deprecated and ignored. The i18n support was removed and Kaku's
+    /// built-in UI is English-only. Kept as a deprecated field (rather than
+    /// dropped) so that `kaku.lua` files carrying `config.language` from
+    /// V0.11.0 still load on upgrade with a warning instead of a hard error.
+    #[dynamic(
+        default,
+        deprecated = "the language option was removed; Kaku's built-in UI is English-only"
+    )]
+    pub language: String,
+
     #[dynamic(try_from = "crate::units::PixelUnit", default = "default_half_cell")]
     pub min_scroll_bar_height: Dimension,
 
@@ -2325,6 +2335,35 @@ mod tests {
         assert_eq!(
             file_uri("see docker/Dockerfile,"),
             "file://docker/Dockerfile"
+        );
+    }
+
+    #[test]
+    fn deprecated_language_field_still_loads() {
+        // V0.11.0 shipped `config.language`; the i18n revert (b4d779a) removed
+        // the field. It must remain a tolerated deprecated field so a kaku.lua
+        // carrying `config.language` still loads on upgrade with a warning
+        // instead of failing config validation with a hard error.
+        use std::collections::BTreeMap;
+        use wezterm_dynamic::{FromDynamic, FromDynamicOptions, UnknownFieldAction, Value};
+
+        let mut map: BTreeMap<Value, Value> = BTreeMap::new();
+        map.insert(
+            Value::String("language".to_string()),
+            Value::String("zh-CN".to_string()),
+        );
+        let value = Value::Object(map.into());
+
+        let result = super::Config::from_dynamic(
+            &value,
+            FromDynamicOptions {
+                unknown_fields: UnknownFieldAction::Deny,
+                deprecated_fields: UnknownFieldAction::Warn,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "config carrying a deprecated `language` must still load: {result:?}"
         );
     }
 }
