@@ -79,6 +79,19 @@ struct CachedLeaderInfo {
     updating: bool,
 }
 
+/// Cache of `with_root_pid(process_group_leader_pid)` to avoid repeating the
+/// full system `proc_listallpids` + per-pid `proc_pidinfo` scan on every paint.
+/// `forces_opaque_kaku_tui_background` (render hot path) and the tab bar both
+/// query this each frame; without a cache, multiple panes streaming output from
+/// TUI agents (claude code, codex) trigger N x ~1000 syscalls per frame.
+#[cfg(unix)]
+#[derive(Clone)]
+struct CachedForegroundProc {
+    updated: Instant,
+    pid: u32,
+    info: LocalProcessInfo,
+}
+
 #[cfg(unix)]
 impl CachedLeaderInfo {
     fn new(fd: Option<std::os::fd::RawFd>) -> Self {
@@ -133,6 +146,8 @@ pub struct LocalPane {
     proc_list: Mutex<Option<CachedProcInfo>>,
     #[cfg(unix)]
     leader: Arc<Mutex<Option<CachedLeaderInfo>>>,
+    #[cfg(unix)]
+    foreground_proc: Mutex<Option<CachedForegroundProc>>,
     encoding: Arc<AtomicU8>,
     command_description: String,
 }
@@ -570,7 +585,22 @@ impl Pane for LocalPane {
     fn get_foreground_process_info(&self, policy: CachePolicy) -> Option<LocalProcessInfo> {
         #[cfg(unix)]
         if let Some(pid) = self.pty.lock().process_group_leader() {
-            return LocalProcessInfo::with_root_pid(pid as u32);
+            let pid = pid as u32;
+            if policy == CachePolicy::AllowStale {
+                let cache = self.foreground_proc.lock();
+                if let Some(cached) = cache.as_ref() {
+                    if cached.pid == pid && cached.updated.elapsed() <= PROC_INFO_CACHE_TTL {
+                        return Some(cached.info.clone());
+                    }
+                }
+            }
+            let info = LocalProcessInfo::with_root_pid(pid)?;
+            *self.foreground_proc.lock() = Some(CachedForegroundProc {
+                updated: Instant::now(),
+                pid,
+                info: info.clone(),
+            });
+            return Some(info);
         }
 
         self.divine_foreground_process(policy)
@@ -1066,6 +1096,8 @@ impl LocalPane {
             proc_list: Mutex::new(None),
             #[cfg(unix)]
             leader: Arc::new(Mutex::new(None)),
+            #[cfg(unix)]
+            foreground_proc: Mutex::new(None),
             encoding,
             command_description,
         }
