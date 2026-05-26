@@ -8,6 +8,32 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Resolve the user's home directory from the environment.
+///
+/// Single source of truth for `$HOME` lookups in this crate so the failure
+/// mode (panic / silent-empty / Result) does not drift between call sites.
+pub(crate) fn home() -> Result<PathBuf> {
+    let h = std::env::var_os("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(h))
+}
+
+/// Expand a leading `~`, `~/`, `$HOME`, `$HOME/`, `${HOME}`, or `${HOME}/`
+/// in `s` to the user's home directory. Returns `None` when `s` carries
+/// none of those forms (caller decides the fallback) or when `$HOME` is
+/// unset.
+pub(crate) fn expand_user_prefix(s: &str) -> Option<PathBuf> {
+    let home = home().ok()?;
+    if s == "~" || s == "$HOME" || s == "${HOME}" {
+        return Some(home);
+    }
+    for prefix in ["~/", "$HOME/", "${HOME}/"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return Some(home.join(rest));
+        }
+    }
+    None
+}
+
 /// Refuse reads of well-known credential / system-secret locations, even when
 /// the caller passes an absolute or `~/`-prefixed path (both of which bypass
 /// the cwd sandbox). Best-effort canonicalization: on ENOENT we compare the
@@ -15,7 +41,6 @@ use std::path::{Path, PathBuf};
 /// caught.
 pub(crate) fn reject_if_sensitive(path: &Path) -> Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let home = std::env::var("HOME").unwrap_or_default();
     let mut blocked: Vec<PathBuf> = vec![
         PathBuf::from("/etc/shadow"),
         PathBuf::from("/etc/sudoers"),
@@ -24,7 +49,7 @@ pub(crate) fn reject_if_sensitive(path: &Path) -> Result<()> {
         PathBuf::from("/private/etc/sudoers"),
         PathBuf::from("/private/etc/sudoers.d"),
     ];
-    if !home.is_empty() {
+    if let Ok(home) = home() {
         for rel in [
             ".ssh",
             ".aws/credentials",
@@ -32,7 +57,7 @@ pub(crate) fn reject_if_sensitive(path: &Path) -> Result<()> {
             ".config/kaku/assistant.toml",
             ".config/kaku/secrets",
         ] {
-            blocked.push(PathBuf::from(&home).join(rel));
+            blocked.push(home.join(rel));
         }
     }
     for b in &blocked {
@@ -48,20 +73,24 @@ pub(crate) fn reject_if_sensitive(path: &Path) -> Result<()> {
 }
 
 /// Handles `~/…` expansion and relative paths (resolved against `cwd`).
+///
+/// Tool paths only accept `~` / `~/`; `$HOME` is not expanded here because
+/// AI models do not pass shell-variable references through this path,
+/// and silently expanding them would change tool-call semantics.
 pub(crate) fn resolve(path: &str, cwd: &str) -> Result<PathBuf> {
-    let p = if path.starts_with("~/") || path == "~" {
-        let home = std::env::var("HOME").context("HOME not set")?;
-        if path == "~" {
-            PathBuf::from(home)
+    if path == "~" || path.starts_with("~/") {
+        let home = home()?;
+        return Ok(if path == "~" {
+            home
         } else {
-            PathBuf::from(home).join(&path[2..])
-        }
-    } else if path.starts_with('/') {
-        PathBuf::from(path)
+            home.join(&path[2..])
+        });
+    }
+    if path.starts_with('/') {
+        Ok(PathBuf::from(path))
     } else {
-        PathBuf::from(cwd).join(path)
-    };
-    Ok(p)
+        Ok(PathBuf::from(cwd).join(path))
+    }
 }
 
 /// Relative tool paths must stay inside the current project. Absolute and

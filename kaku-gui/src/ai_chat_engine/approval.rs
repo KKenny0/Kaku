@@ -322,36 +322,8 @@ fn push_shell_path_candidate(raw: &str, candidates: &mut Vec<std::path::PathBuf>
         return;
     }
 
-    if s == "~" || s.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            if s == "~" {
-                candidates.push(std::path::PathBuf::from(home));
-            } else {
-                candidates.push(std::path::PathBuf::from(home).join(&s[2..]));
-            }
-        }
-        return;
-    }
-
-    if s == "$HOME" || s.starts_with("$HOME/") {
-        if let Ok(home) = std::env::var("HOME") {
-            if s == "$HOME" {
-                candidates.push(std::path::PathBuf::from(home));
-            } else {
-                candidates.push(std::path::PathBuf::from(home).join(&s["$HOME/".len()..]));
-            }
-        }
-        return;
-    }
-
-    if s == "${HOME}" || s.starts_with("${HOME}/") {
-        if let Ok(home) = std::env::var("HOME") {
-            if s == "${HOME}" {
-                candidates.push(std::path::PathBuf::from(home));
-            } else {
-                candidates.push(std::path::PathBuf::from(home).join(&s["${HOME}/".len()..]));
-            }
-        }
+    if let Some(expanded) = crate::ai_tools::paths::expand_user_prefix(s) {
+        candidates.push(expanded);
         return;
     }
 
