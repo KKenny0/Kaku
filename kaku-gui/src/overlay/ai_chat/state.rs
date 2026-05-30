@@ -21,10 +21,6 @@ use super::prompt_context::{
 use super::types::*;
 use super::{strings, syntax, waza};
 
-/// Placeholder line shown while a `/suggest` request is in flight. `drain_suggest`
-/// replaces this exact line in place once the result arrives.
-const SUGGEST_PENDING_TEXT: &str = "Thinking about a follow-up suggestion...";
-
 // ─── Input snapshot helpers ───────────────────────────────────────────────────
 
 /// Push `(input, cursor)` onto `stack` iff the input is non-empty. When the
@@ -1859,13 +1855,10 @@ impl App {
             self.push_info("Not enough conversation yet to suggest a follow-up.");
             return;
         }
-        if self.suggest_rx.is_some() {
-            self.push_info("Already working on a suggestion, hold on.");
-            return;
-        }
-        self.push_info(SUGGEST_PENDING_TEXT);
         let client = self.client.clone();
         let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        // A second `/suggest` before the first lands drops the prior receiver;
+        // its worker's `send` becomes a no-op via `let _ =`.
         self.suggest_rx = Some(rx);
         crate::thread_util::spawn_with_pool(move || {
             let result = crate::ai_chat_engine::suggestion::generate_suggestion(&client, &msgs)
@@ -1875,8 +1868,7 @@ impl App {
     }
 
     /// Drain the background `/suggest` channel. Returns true if a redraw is
-    /// needed. Replaces the pending placeholder line in place so the transcript
-    /// shows a single suggestion line rather than placeholder + result.
+    /// needed.
     pub(crate) fn drain_suggest(&mut self) -> bool {
         let rx = match self.suggest_rx.take() {
             Some(rx) => rx,
@@ -1897,20 +1889,6 @@ impl App {
                 "Could not generate a suggestion right now.".to_string()
             }
         };
-        // Replace the placeholder wherever it sits, not just at the tail: the
-        // user may have produced new lines while the request was in flight, in
-        // which case the pending line is no longer last. Searching from the end
-        // targets the most recent (and only) outstanding placeholder.
-        if let Some(slot) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.is_context && m.content == SUGGEST_PENDING_TEXT)
-        {
-            slot.content = text;
-            self.display_lines_dirty = true;
-            return true;
-        }
         self.push_info(&text);
         true
     }
