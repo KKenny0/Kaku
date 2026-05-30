@@ -778,6 +778,22 @@ impl TerminalState {
         &mut self.screen
     }
 
+    /// Prepend lines to the primary screen's scrollback regardless of which
+    /// screen is currently active. Session restore uses this so that a pane
+    /// briefly on the alt screen at save time still receives its main-screen
+    /// history when restored. Each line gets the current seqno so the
+    /// renderer marks the prepended block dirty in one tick.
+    pub fn prepend_primary_scrollback(&mut self, lines: Vec<wezterm_surface::Line>) {
+        if lines.is_empty() {
+            return;
+        }
+        self.increment_seqno();
+        let seqno = self.seqno;
+        self.screen
+            .primary_screen_mut()
+            .prepend_scrollback_lines(lines, seqno);
+    }
+
     fn set_clipboard_contents(
         &self,
         selection: ClipboardSelection,

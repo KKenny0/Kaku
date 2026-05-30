@@ -529,6 +529,11 @@ impl Pane for LocalPane {
         }
     }
 
+    fn inject_scrollback(&self, lines: Vec<Line>) -> anyhow::Result<()> {
+        self.terminal.lock().prepend_primary_scrollback(lines);
+        Ok(())
+    }
+
     fn focus_changed(&self, focused: bool) {
         self.terminal.lock().focus_changed(focused);
     }

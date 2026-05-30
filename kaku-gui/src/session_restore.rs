@@ -17,12 +17,33 @@ use wezterm_term::TerminalSize;
 use wezterm_toast_notification::persistent_toast_notification;
 use window::WindowOps;
 
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
+
+/// Bincode-format version for per-pane scrollback sidecars. Bumped
+/// independently of `SNAPSHOT_VERSION` so content changes do not force the
+/// envelope to invalidate older snapshots.
+const CONTENT_SCHEMA_VERSION: u32 = 1;
+
+/// Sentinel constant for the `Line`/`Cell` serde layout from wezterm-surface.
+/// Bump manually when pulling an upstream wezterm change that touches the
+/// serialized `Line` shape; old sidecars are then silently skipped instead
+/// of producing garbage cells.
+const WEZTERM_SURFACE_FINGERPRINT: &str = "wezterm-surface-2026-05";
+
+/// Per-pane scrollback cap. 1500 lines is enough to cover a normal `git
+/// log -n 500`, a `cargo build` log, or a verbose CI dump while keeping the
+/// bincode sidecars under a few MB each.
+const PANE_CONTENT_CAP_LINES: usize = 1500;
 
 // Envelope written on app quit: continue-where-you-left-off.
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedSession {
     version: u32,
+    /// Relative directory name under `session_content/` that holds this
+    /// snapshot's per-pane scrollback sidecars. Empty string when the
+    /// snapshot has no content sidecars (e.g. every pane was trivial).
+    #[serde(default)]
+    content_dir: String,
     windows: Vec<SavedWindowSnapshot>,
 }
 
@@ -30,6 +51,9 @@ struct SavedSession {
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedClosedWindow {
     version: u32,
+    /// See `SavedSession::content_dir`.
+    #[serde(default)]
+    content_dir: String,
     window: SavedWindowSnapshot,
 }
 
@@ -71,18 +95,57 @@ struct SavedPaneEntry {
     is_active_pane: bool,
     is_zoomed_pane: bool,
     workspace: String,
+    /// When present, points at a bincode sidecar in this snapshot's
+    /// content directory holding the pane's scrollback at save time.
+    /// Absent for trivial panes or when scrollback capture failed.
+    #[serde(default)]
+    content_ref: Option<PaneContentRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PaneContentRef {
+    /// Filename under the snapshot's content directory; conventionally
+    /// `pane_<pane_id>.bin`.
+    filename: String,
+    /// Mirrors `CONTENT_SCHEMA_VERSION` at save time.
+    schema: u32,
+    /// Terminal size at save time. Used to decide whether reflow is
+    /// needed when restoring into a different geometry.
+    saved_cols: usize,
+    saved_rows: usize,
+    /// Convenience: how many lines the sidecar contains. Lets the GC and
+    /// telemetry skip opening the file.
+    line_count: usize,
+}
+
+/// Bincode payload written to each pane sidecar.
+#[derive(Serialize, Deserialize)]
+struct PaneContentPayload {
+    schema: u32,
+    fingerprint: String,
+    cols: usize,
+    rows: usize,
+    lines: Vec<wezterm_term::Line>,
 }
 
 impl SavedPaneNode {
-    fn from_live(node: PaneNode, mux: &Mux) -> anyhow::Result<Self> {
+    fn from_live(
+        node: PaneNode,
+        mux: &Mux,
+        content_dir: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
         match node {
             PaneNode::Empty => Ok(Self::Empty),
             PaneNode::Split { left, right, node } => Ok(Self::Split {
-                left: Box::new(Self::from_live(*left, mux)?),
-                right: Box::new(Self::from_live(*right, mux)?),
+                left: Box::new(Self::from_live(*left, mux, content_dir)?),
+                right: Box::new(Self::from_live(*right, mux, content_dir)?),
                 node,
             }),
-            PaneNode::Leaf(entry) => Ok(Self::Leaf(SavedPaneEntry::from_live(entry, mux)?)),
+            PaneNode::Leaf(entry) => Ok(Self::Leaf(SavedPaneEntry::from_live(
+                entry,
+                mux,
+                content_dir,
+            )?)),
         }
     }
 
@@ -108,7 +171,11 @@ impl SavedPaneNode {
 }
 
 impl SavedPaneEntry {
-    fn from_live(entry: PaneEntry, mux: &Mux) -> anyhow::Result<Self> {
+    fn from_live(
+        entry: PaneEntry,
+        mux: &Mux,
+        content_dir: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
         let pane = mux
             .get_pane(entry.pane_id)
             .ok_or_else(|| anyhow!("pane {} not found while building snapshot", entry.pane_id))?;
@@ -119,6 +186,14 @@ impl SavedPaneEntry {
                 entry.pane_id
             )
         })?;
+
+        // Best-effort: capture and write the scrollback sidecar. Any
+        // failure (capture returns None, write fails) drops back to
+        // `content_ref: None` so the structural snapshot still saves.
+        let content_ref = content_dir.and_then(|dir| {
+            let (lines, cols, rows) = capture_pane_content(&pane, PANE_CONTENT_CAP_LINES)?;
+            write_pane_sidecar(dir, entry.pane_id, lines, cols, rows)
+        });
 
         Ok(Self {
             window_id: entry.window_id,
@@ -131,6 +206,7 @@ impl SavedPaneEntry {
             is_active_pane: entry.is_active_pane,
             is_zoomed_pane: entry.is_zoomed_pane,
             workspace: entry.workspace,
+            content_ref,
         })
     }
 
@@ -168,6 +244,207 @@ fn session_file() -> PathBuf {
 
 fn closed_window_file() -> PathBuf {
     config_dir_file("last_closed_window.json")
+}
+
+fn content_root_dir() -> PathBuf {
+    config_dir_file("session_content")
+}
+
+/// Build a per-snapshot content directory name. We avoid pulling in `uuid`
+/// here because the existing atomic-write helper already uses a
+/// pid-plus-nanos pattern for the same uniqueness purpose.
+fn new_content_dir_name(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}-{pid}-{nanos}", pid = std::process::id())
+}
+
+/// Capture up to `cap` of the pane's most recent lines (scrollback +
+/// viewport, ordered oldest first). Returns the lines plus the saved
+/// `(cols, rows)` geometry. Returns `None` for trivial empty captures so
+/// the caller can skip the sidecar write entirely.
+fn capture_pane_content(
+    pane: &Arc<dyn Pane>,
+    cap: usize,
+) -> Option<(Vec<wezterm_term::Line>, usize, usize)> {
+    if cap == 0 {
+        return None;
+    }
+    let dims = pane.get_dimensions();
+    let end: wezterm_term::StableRowIndex = dims.physical_top + dims.viewport_rows as isize;
+    let start = (end - cap as isize).max(dims.scrollback_top);
+    if start >= end {
+        return None;
+    }
+    let (_top, lines) = pane.get_lines(start..end);
+    if lines.is_empty() {
+        return None;
+    }
+    Some((lines, dims.cols, dims.viewport_rows))
+}
+
+/// Atomic write for bincode payloads, mirroring `write_json_atomic`.
+fn write_bincode_atomic<T: Serialize>(
+    file_name: &std::path::Path,
+    value: &T,
+) -> anyhow::Result<()> {
+    if let Some(parent) = file_name.parent() {
+        config::create_user_owned_dirs(parent)
+            .with_context(|| format!("create content dir {}", parent.display()))?;
+    }
+    let encoded = bincode::serialize(value).context("encode pane content")?;
+    let tmp = file_name.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name.file_stem().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, &encoded).with_context(|| format!("write {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &file_name) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), file_name.display()));
+    }
+    Ok(())
+}
+
+/// Write a captured pane's content to its sidecar. On success returns the
+/// `PaneContentRef` that should be embedded in the `SavedPaneEntry`. On
+/// failure logs and returns `None`; the structural snapshot is unaffected.
+fn write_pane_sidecar(
+    content_dir: &std::path::Path,
+    pane_id: PaneId,
+    lines: Vec<wezterm_term::Line>,
+    cols: usize,
+    rows: usize,
+) -> Option<PaneContentRef> {
+    let filename = format!("pane_{pane_id}.bin");
+    let path = content_dir.join(&filename);
+    let line_count = lines.len();
+    let payload = PaneContentPayload {
+        schema: CONTENT_SCHEMA_VERSION,
+        fingerprint: WEZTERM_SURFACE_FINGERPRINT.to_string(),
+        cols,
+        rows,
+        lines,
+    };
+    match write_bincode_atomic(&path, &payload) {
+        Ok(()) => Some(PaneContentRef {
+            filename,
+            schema: CONTENT_SCHEMA_VERSION,
+            saved_cols: cols,
+            saved_rows: rows,
+            line_count,
+        }),
+        Err(e) => {
+            log::warn!(
+                "skip scrollback sidecar for pane {pane_id}: {e:#} ({})",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Load a pane sidecar referenced by `content_ref`. Returns `None` (with a
+/// warning) on any failure so the restore path can degrade to an empty
+/// scrollback.
+fn load_pane_payload(
+    content_dir: &std::path::Path,
+    content_ref: &PaneContentRef,
+) -> Option<PaneContentPayload> {
+    let path = content_dir.join(&content_ref.filename);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::debug!("scrollback sidecar missing at {}: {e:#}", path.display());
+            return None;
+        }
+    };
+    let payload: PaneContentPayload = match bincode::deserialize(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "scrollback sidecar at {} failed to parse: {e:#}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    if payload.schema != CONTENT_SCHEMA_VERSION {
+        log::warn!(
+            "scrollback sidecar at {} has schema {} (expected {}); skipping",
+            path.display(),
+            payload.schema,
+            CONTENT_SCHEMA_VERSION,
+        );
+        return None;
+    }
+    if payload.fingerprint != WEZTERM_SURFACE_FINGERPRINT {
+        log::warn!(
+            "scrollback sidecar at {} has fingerprint {:?} (expected {:?}); \
+             upstream wezterm-surface layout changed, skipping",
+            path.display(),
+            payload.fingerprint,
+            WEZTERM_SURFACE_FINGERPRINT,
+        );
+        return None;
+    }
+    Some(payload)
+}
+
+/// Reflow saved lines to fit a new column width via `Line::wrap`. Trims
+/// from the oldest end so the resulting block does not exceed
+/// `PANE_CONTENT_CAP_LINES`.
+fn reflow_lines(lines: Vec<wezterm_term::Line>, target_cols: usize) -> Vec<wezterm_term::Line> {
+    if target_cols == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<wezterm_term::Line> = Vec::with_capacity(lines.len());
+    for line in lines {
+        for sub in line.wrap(target_cols, 0) {
+            out.push(sub);
+        }
+    }
+    if out.len() > PANE_CONTENT_CAP_LINES {
+        let drop = out.len() - PANE_CONTENT_CAP_LINES;
+        out.drain(0..drop);
+    }
+    out
+}
+
+/// Remove any orphaned content directories under `session_content/` that
+/// are not referenced by either the current session or last-closed-window
+/// envelope. Best-effort; failures are logged at debug level so a flaky
+/// filesystem does not derail the save path.
+fn gc_content_dirs(keep: &[&str]) {
+    let root = content_root_dir();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(e) => {
+            log::debug!("content GC skipped, cannot list {}: {e:#}", root.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if keep.iter().any(|k| k == &name.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                log::debug!("content GC could not remove {}: {e:#}", path.display());
+            }
+        }
+    }
 }
 
 fn collect_leaf_entries(node: &SavedPaneNode, out: &mut Vec<SavedPaneEntry>) {
@@ -262,13 +539,28 @@ impl Drop for RestoringGuard {
 
 // ---------- Triviality / emptiness ----------
 
+/// Decide triviality from tab count alone. `Some(true)` means trivial,
+/// `Some(false)` means definitely not, `None` means inspect the single tab's
+/// pane count and scrollback to decide.
+fn tab_count_triviality(tab_count: usize) -> Option<bool> {
+    match tab_count {
+        // Zero tabs: a pristine startup window from
+        // applicationOpenUntitledFile whose first tab is still being spawned
+        // asynchronously. Treat as trivial so the auto-restore lookup reuses
+        // it instead of leaving a phantom window beside the restored ones.
+        0 => Some(true),
+        1 => None,
+        _ => Some(false),
+    }
+}
+
 fn is_window_trivial(window_id: MuxWindowId) -> bool {
     let mux = Mux::get();
     let Some(window) = mux.get_window(window_id) else {
         return true;
     };
-    if window.len() != 1 {
-        return false;
+    if let Some(verdict) = tab_count_triviality(window.len()) {
+        return verdict;
     }
     let Some(tab) = window.get_by_idx(0) else {
         return true;
@@ -292,7 +584,10 @@ fn is_window_empty(window_id: MuxWindowId) -> bool {
 
 // ---------- Snapshot building ----------
 
-fn build_snapshot_for_window(window_id: MuxWindowId) -> anyhow::Result<SavedWindowSnapshot> {
+fn build_snapshot_for_window(
+    window_id: MuxWindowId,
+    content_dir: Option<&std::path::Path>,
+) -> anyhow::Result<SavedWindowSnapshot> {
     let mux = Mux::get();
     let window = mux
         .get_window(window_id)
@@ -303,7 +598,7 @@ fn build_snapshot_for_window(window_id: MuxWindowId) -> anyhow::Result<SavedWind
         .map(|tab| {
             Ok(SavedTabSnapshot {
                 title: tab.get_title(),
-                pane_tree: SavedPaneNode::from_live(tab.codec_pane_tree(), &mux)?,
+                pane_tree: SavedPaneNode::from_live(tab.codec_pane_tree(), &mux, content_dir)?,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -355,12 +650,25 @@ pub fn save_closed_window_snapshot(window_id: MuxWindowId) -> anyhow::Result<()>
     if is_window_trivial(window_id) {
         return Ok(());
     }
-    let snapshot = build_snapshot_for_window(window_id)?;
+    let content_dir_name = new_content_dir_name("closed");
+    let content_dir = content_root_dir().join(&content_dir_name);
+    if let Err(e) = config::create_user_owned_dirs(&content_dir) {
+        log::debug!(
+            "scrollback dir {} could not be created: {e:#}",
+            content_dir.display()
+        );
+    }
+    let snapshot = build_snapshot_for_window(window_id, Some(&content_dir))?;
     let envelope = SavedClosedWindow {
         version: SNAPSHOT_VERSION,
+        content_dir: content_dir_name,
         window: snapshot,
     };
-    write_json_atomic(&closed_window_file(), &envelope)
+    let result = write_json_atomic(&closed_window_file(), &envelope);
+    if result.is_ok() {
+        gc_kept_content_dirs();
+    }
+    result
 }
 
 pub fn save_session_snapshot() -> anyhow::Result<()> {
@@ -372,12 +680,21 @@ pub fn save_session_snapshot() -> anyhow::Result<()> {
     let mut window_ids = mux.iter_windows();
     window_ids.sort();
 
+    let content_dir_name = new_content_dir_name("session");
+    let content_dir = content_root_dir().join(&content_dir_name);
+    if let Err(e) = config::create_user_owned_dirs(&content_dir) {
+        log::debug!(
+            "scrollback dir {} could not be created: {e:#}",
+            content_dir.display()
+        );
+    }
+
     let mut windows = Vec::new();
     for id in window_ids {
         if is_window_logically_closed(id) {
             continue;
         }
-        match build_snapshot_for_window(id) {
+        match build_snapshot_for_window(id, Some(&content_dir)) {
             Ok(snap) => windows.push(snap),
             Err(err) => log::debug!("skip window {id} for session snapshot: {err:#}"),
         }
@@ -386,6 +703,7 @@ pub fn save_session_snapshot() -> anyhow::Result<()> {
     // Don't overwrite a useful saved session with a session that is entirely
     // trivial (e.g. a single fresh shell prompt the user opened and closed).
     if windows.is_empty() {
+        let _ = std::fs::remove_dir_all(&content_dir);
         return Ok(());
     }
     let all_trivial = windows.iter().all(|w| {
@@ -403,15 +721,40 @@ pub fn save_session_snapshot() -> anyhow::Result<()> {
             collect_leaf_entries(&t.pane_tree, &mut leaves);
         }
         if leaves.len() <= 1 {
+            let _ = std::fs::remove_dir_all(&content_dir);
             return Ok(());
         }
     }
 
     let session = SavedSession {
         version: SNAPSHOT_VERSION,
+        content_dir: content_dir_name,
         windows,
     };
-    write_json_atomic(&session_file(), &session)
+    let result = write_json_atomic(&session_file(), &session);
+    if result.is_ok() {
+        gc_kept_content_dirs();
+    }
+    result
+}
+
+/// Sweep `session_content/` so only the directories referenced by the
+/// current `last_session.json` and `last_closed_window.json` envelopes
+/// survive. Called after each successful envelope write.
+fn gc_kept_content_dirs() {
+    let mut keep_strings = Vec::new();
+    if let Ok(Some(session)) = load_session_from_path(&session_file()) {
+        if !session.content_dir.is_empty() {
+            keep_strings.push(session.content_dir);
+        }
+    }
+    if let Ok(Some(closed)) = load_closed_window_from_path(&closed_window_file()) {
+        if !closed.content_dir.is_empty() {
+            keep_strings.push(closed.content_dir);
+        }
+    }
+    let keep_refs: Vec<&str> = keep_strings.iter().map(|s| s.as_str()).collect();
+    gc_content_dirs(&keep_refs);
 }
 
 // ---------- Load entry points ----------
@@ -509,6 +852,7 @@ fn delete_closed_window_file() {
 
 async fn spawn_panes_for_tab(
     root: &SavedPaneNode,
+    content_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<std::collections::HashMap<PaneId, Arc<dyn Pane>>> {
     let mux = Mux::get();
     let encoding = config::configuration().default_encoding;
@@ -535,6 +879,24 @@ async fn spawn_panes_for_tab(
                     entry.pane_id, entry.domain_name
                 )
             })?;
+
+        // Best-effort: surface the previous session's scrollback above the
+        // freshly spawned shell's prompt. Failure paths (sidecar missing,
+        // schema mismatch, alt screen) all degrade silently to an empty
+        // scrollback so the structural restore is never blocked.
+        if let (Some(dir), Some(content_ref)) = (content_dir, entry.content_ref.as_ref()) {
+            if let Some(payload) = load_pane_payload(dir, content_ref) {
+                let lines = if payload.cols != entry.size.cols {
+                    reflow_lines(payload.lines, entry.size.cols)
+                } else {
+                    payload.lines
+                };
+                if let Err(e) = pane.inject_scrollback(lines) {
+                    log::warn!("inject scrollback for pane {}: {e:#}", entry.pane_id);
+                }
+            }
+        }
+
         panes.insert(entry.pane_id, pane);
     }
 
@@ -560,12 +922,13 @@ async fn build_tabs_into_window(
     window_id: MuxWindowId,
     tabs: Vec<SavedTabSnapshot>,
     actual_size: Option<TerminalSize>,
+    content_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let mux = Mux::get();
     for saved_tab in tabs {
         let size = saved_tab.pane_tree.root_size().unwrap_or_default();
         let tab = Arc::new(Tab::new(&size));
-        let panes = spawn_panes_for_tab(&saved_tab.pane_tree).await?;
+        let panes = spawn_panes_for_tab(&saved_tab.pane_tree, content_dir).await?;
         let pane_tree = saved_tab.pane_tree.into_pane_node();
 
         tab.try_sync_with_pane_tree(size, pane_tree, |entry| {
@@ -592,6 +955,7 @@ async fn build_tabs_into_window(
 async fn restore_window(
     snapshot: SavedWindowSnapshot,
     current_window_id: Option<MuxWindowId>,
+    content_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<MuxWindowId> {
     let mux = Mux::get();
     let SavedWindowSnapshot {
@@ -602,20 +966,27 @@ async fn restore_window(
     } = snapshot;
     let actual_size = get_existing_terminal_size().await;
 
-    // The user pressed the menu inside `current_window_id`; that window is
-    // clearly live again even if it was previously closed and re-shown via
-    // the macOS Dock. Drop any stale "logically closed" marker before we
-    // decide replace-vs-newwindow so the next save sees consistent state.
+    // The caller decides whether this window is reusable: startup's
+    // `restore_session` passes the `preexisting_empty` pristine window;
+    // `restore_previous_window_from_menu` only passes the current window if
+    // it has pre-checked emptiness. Either way, force-replace here. The old
+    // inner `is_window_empty` re-check was racy: shell banners or plugin
+    // status could push scrollback past the viewport between the lookup and
+    // this point, causing the function to fall through and create a phantom
+    // new window beside the original.
+    //
+    // We still drop the stale logically-closed marker so the next save
+    // captures consistent state.
     if let Some(window_id) = current_window_id {
         forget_logically_closed(window_id);
-        if is_window_empty(window_id) {
+        if mux.get_window(window_id).is_some() {
             let existing_tab_ids: Vec<TabId> = match mux.get_window(window_id) {
                 Some(window) => window.iter().map(|t| t.tab_id()).collect(),
                 None => Vec::new(),
             };
 
             // Spawn new tabs first to avoid a tab-less window flash.
-            build_tabs_into_window(window_id, tabs, actual_size).await?;
+            build_tabs_into_window(window_id, tabs, actual_size, content_dir).await?;
 
             // Now drop the originally-empty tabs.
             for old in existing_tab_ids {
@@ -642,7 +1013,7 @@ async fn restore_window(
     let new_window_id = *builder;
 
     let result = async {
-        build_tabs_into_window(new_window_id, tabs, actual_size).await?;
+        build_tabs_into_window(new_window_id, tabs, actual_size, content_dir).await?;
 
         if let Some(mut window) = mux.get_window_mut(new_window_id) {
             if !window_title.is_empty() {
@@ -677,18 +1048,26 @@ async fn restore_session(
 
     let SavedSession {
         version: _,
+        content_dir: content_dir_name,
         windows,
     } = session;
     if windows.is_empty() {
         return Ok(());
     }
 
+    let content_dir_path = if content_dir_name.is_empty() {
+        None
+    } else {
+        Some(content_root_dir().join(&content_dir_name))
+    };
+    let content_dir = content_dir_path.as_deref();
+
     let focused_idx = windows.iter().position(|w| w.is_focused).unwrap_or(0);
 
     let mut new_window_ids: Vec<MuxWindowId> = Vec::with_capacity(windows.len());
     for (idx, window_snap) in windows.into_iter().enumerate() {
         let target = if idx == 0 { current_window_id } else { None };
-        match restore_window(window_snap, target).await {
+        match restore_window(window_snap, target, content_dir).await {
             Ok(id) => new_window_ids.push(id),
             Err(err) => log::warn!("failed to restore one window from session: {err:#}"),
         }
@@ -715,7 +1094,21 @@ pub fn restore_previous_window_from_menu(current_window_id: Option<MuxWindowId>)
             match load_closed_window()? {
                 Some(closed) => {
                     let _guard = RestoringGuard::new();
-                    restore_window(closed.window, current_window_id).await?;
+                    // The menu path must preserve the user's current work.
+                    // Only force-reuse `current_window_id` when it is empty;
+                    // otherwise pass `None` so `restore_window` opens a
+                    // fresh window beside it. `restore_window` no longer
+                    // does this check internally (it would race with
+                    // shell-startup output and miscompute emptiness).
+                    let reuse_target =
+                        current_window_id.filter(|window_id| is_window_empty(*window_id));
+                    let content_dir_path = if closed.content_dir.is_empty() {
+                        None
+                    } else {
+                        Some(content_root_dir().join(&closed.content_dir))
+                    };
+                    restore_window(closed.window, reuse_target, content_dir_path.as_deref())
+                        .await?;
                     drop(_guard);
                     // Consume the snapshot only on success: if restore failed
                     // (e.g. domain unavailable), keep the file so the user can
@@ -783,6 +1176,7 @@ mod tests {
     fn sample_session(version: u32) -> SavedSession {
         SavedSession {
             version,
+            content_dir: String::new(),
             windows: vec![sample_window("Test Window")],
         }
     }
@@ -790,6 +1184,7 @@ mod tests {
     fn sample_closed(version: u32) -> SavedClosedWindow {
         SavedClosedWindow {
             version,
+            content_dir: String::new(),
             window: sample_window("Test Window"),
         }
     }
@@ -913,5 +1308,143 @@ mod tests {
         assert!(is_window_logically_closed(id));
         forget_logically_closed(id);
         assert!(!is_window_logically_closed(id));
+    }
+
+    #[test]
+    fn tab_count_triviality_treats_pristine_zero_as_trivial() {
+        // Pristine startup window with no tabs yet: must be reusable so the
+        // auto-restore lookup does not leave a phantom window beside the
+        // restored ones.
+        assert_eq!(tab_count_triviality(0), Some(true));
+        // Single-tab path is undecided here; the caller must inspect panes.
+        assert_eq!(tab_count_triviality(1), None);
+        // Multi-tab is never trivial.
+        assert_eq!(tab_count_triviality(2), Some(false));
+        assert_eq!(tab_count_triviality(99), Some(false));
+    }
+
+    // Bug B (`restore_window` force-reuses when `current_window_id` is Some)
+    // and Bug C (menu caller pre-checks `is_window_empty`) both depend on a
+    // live `Mux` singleton plus a freshly spawned async window. There is no
+    // mux test harness in this crate yet, so they are covered by the manual
+    // verification step in /Users/tw93/.claude/plans/quiet-weaving-valiant.md:
+    // cold-launch with a saved one-window session must produce exactly one
+    // window, and the menu "restore previous window" path inside a non-empty
+    // window must open a new window beside the user's current work.
+
+    // ---- Part 2: content restoration ----
+
+    fn make_line(text: &str) -> wezterm_term::Line {
+        wezterm_term::Line::from_text(text, &wezterm_term::CellAttributes::default(), 0, None)
+    }
+
+    fn sample_payload(cols: usize, rows: usize, line_count: usize) -> PaneContentPayload {
+        let lines = (0..line_count)
+            .map(|i| make_line(&format!("line {i}")))
+            .collect();
+        PaneContentPayload {
+            schema: CONTENT_SCHEMA_VERSION,
+            fingerprint: WEZTERM_SURFACE_FINGERPRINT.to_string(),
+            cols,
+            rows,
+            lines,
+        }
+    }
+
+    #[test]
+    fn pane_content_round_trips_via_bincode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_42.bin");
+        let payload = sample_payload(80, 24, 5);
+        write_bincode_atomic(&path, &payload).unwrap();
+
+        let content_ref = PaneContentRef {
+            filename: "pane_42.bin".into(),
+            schema: CONTENT_SCHEMA_VERSION,
+            saved_cols: 80,
+            saved_rows: 24,
+            line_count: 5,
+        };
+        let loaded = load_pane_payload(dir.path(), &content_ref).expect("payload present");
+        assert_eq!(loaded.cols, 80);
+        assert_eq!(loaded.rows, 24);
+        assert_eq!(loaded.lines.len(), 5);
+        assert_eq!(loaded.lines[0].as_str(), "line 0");
+        assert_eq!(loaded.lines[4].as_str(), "line 4");
+    }
+
+    #[test]
+    fn pane_content_skipped_when_sidecar_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let content_ref = PaneContentRef {
+            filename: "pane_999.bin".into(),
+            schema: CONTENT_SCHEMA_VERSION,
+            saved_cols: 80,
+            saved_rows: 24,
+            line_count: 0,
+        };
+        assert!(load_pane_payload(dir.path(), &content_ref).is_none());
+    }
+
+    #[test]
+    fn pane_content_skipped_when_schema_mismatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_7.bin");
+        let mut payload = sample_payload(80, 24, 2);
+        payload.schema = u32::MAX;
+        write_bincode_atomic(&path, &payload).unwrap();
+
+        let content_ref = PaneContentRef {
+            filename: "pane_7.bin".into(),
+            schema: u32::MAX,
+            saved_cols: 80,
+            saved_rows: 24,
+            line_count: 2,
+        };
+        assert!(load_pane_payload(dir.path(), &content_ref).is_none());
+    }
+
+    #[test]
+    fn pane_content_skipped_when_fingerprint_mismatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_8.bin");
+        let mut payload = sample_payload(80, 24, 2);
+        payload.fingerprint = "wezterm-surface-from-the-future".to_string();
+        write_bincode_atomic(&path, &payload).unwrap();
+
+        let content_ref = PaneContentRef {
+            filename: "pane_8.bin".into(),
+            schema: CONTENT_SCHEMA_VERSION,
+            saved_cols: 80,
+            saved_rows: 24,
+            line_count: 2,
+        };
+        assert!(load_pane_payload(dir.path(), &content_ref).is_none());
+    }
+
+    #[test]
+    fn reflow_caps_total_lines_after_wrapping() {
+        // Start with 1200 short lines at 80 cols, target 10 cols. Each line
+        // is unwrapped (no internal wrap state) so wrap to 10 cols leaves it
+        // a single sub-line (`Line::wrap` only splits at the column boundary
+        // when the line is actually wider). What this test guarantees is the
+        // pure invariant: `reflow_lines` never returns more than the cap.
+        let lines: Vec<wezterm_term::Line> =
+            (0..2000).map(|i| make_line(&format!("L{i}"))).collect();
+        let out = reflow_lines(lines, 10);
+        assert!(out.len() <= PANE_CONTENT_CAP_LINES);
+    }
+
+    #[test]
+    fn reflow_preserves_recent_lines_when_capping() {
+        // The newest lines must survive when the cap drops the oldest.
+        let lines: Vec<wezterm_term::Line> = (0..PANE_CONTENT_CAP_LINES + 200)
+            .map(|i| make_line(&format!("L{i}")))
+            .collect();
+        let out = reflow_lines(lines, 80);
+        assert_eq!(out.len(), PANE_CONTENT_CAP_LINES);
+        let last = out.last().unwrap();
+        let total = PANE_CONTENT_CAP_LINES + 200;
+        assert_eq!(last.as_str(), format!("L{}", total - 1));
     }
 }

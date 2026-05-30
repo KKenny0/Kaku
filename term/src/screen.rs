@@ -362,6 +362,33 @@ impl Screen {
         self.lines.len()
     }
 
+    /// Prepend lines to the scrollback (the oldest end). Used by session
+    /// restore to re-surface the previous run's history above the freshly
+    /// spawned shell's prompt. Input is ordered oldest-to-newest. Lines that
+    /// would exceed the configured scrollback cap are dropped from the
+    /// oldest end. Each injected line's change seqno is bumped so the
+    /// renderer marks the prepended block dirty.
+    pub fn prepend_scrollback_lines(&mut self, mut lines: Vec<Line>, seqno: SequenceNo) {
+        if lines.is_empty() {
+            return;
+        }
+        let cap = self.scrollback_size();
+        if lines.len() > cap {
+            let drop = lines.len() - cap;
+            lines.drain(0..drop);
+        }
+        for line in lines.iter_mut() {
+            line.update_last_change_seqno(seqno);
+        }
+        for line in lines.into_iter().rev() {
+            self.lines.push_front(line);
+        }
+        let max_total = cap + self.physical_rows;
+        while self.lines.len() > max_total {
+            self.lines.pop_front();
+        }
+    }
+
     /// Sets a line dirty.  The line is relative to the visible origin.
     #[inline]
     pub fn dirty_line(&mut self, idx: VisibleRowIndex, seqno: SequenceNo) {

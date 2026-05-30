@@ -340,6 +340,15 @@ pub trait Pane: Downcast + Send + Sync {
 
     fn erase_scrollback(&self, _erase_mode: ScrollbackEraseMode) {}
 
+    /// Prepend lines to the primary scrollback. Session restore uses this to
+    /// re-surface the previous run's history above the freshly spawned
+    /// shell's prompt. Default no-op so that remote and mux-server pane
+    /// implementations can keep ignoring it; `LocalPane` overrides to push
+    /// the lines into its `Terminal`'s primary screen.
+    fn inject_scrollback(&self, _lines: Vec<Line>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Called to advise on whether this tab has focus
     fn focus_changed(&self, _focused: bool) {}
 
