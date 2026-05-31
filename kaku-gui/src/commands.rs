@@ -221,6 +221,7 @@ impl CommandDef {
             CloseCurrentTab { confirm: true },
             CloseCurrentPane { confirm: true },
             RestorePreviousWindow,
+            EmitEvent(crate::document_workbench::EVENT_NAME.to_string()),
             // Edit menu
             CopyTo(ClipboardCopyDestination::Clipboard),
             PasteFrom(ClipboardPasteSource::Clipboard),
@@ -374,6 +375,7 @@ impl CommandDef {
                     if name == "kaku-ai-chat"
                         || name == "kaku-launch-lazygit"
                         || name == "kaku-launch-yazi"
+                        || name == crate::document_workbench::EVENT_NAME
                         || name == "run-kaku-ai-config"
             )
         }
@@ -735,10 +737,11 @@ impl CommandDef {
                     EmitEvent(name) if name == "kaku-launch-lazygit" => 22,
                     EmitEvent(name) if name == "kaku-launch-yazi" => 23,
                     EmitEvent(name) if name == "kaku-open-remote-files" => 24,
+                    EmitEvent(name) if name == crate::document_workbench::EVENT_NAME => 25,
                     SplitVertical(_) | SplitHorizontal(_) | SplitPane(_) => 30,
                     CloseCurrentTab { .. } | CloseCurrentPane { .. } => 40,
                     RestorePreviousWindow => 42,
-                    ActivateCommandPalette => 25,
+                    ActivateCommandPalette => 26,
                     ShowLauncher | ShowLauncherArgs(_) => 50,
                     AttachDomain(_) => 70,
                     DetachDomain(_) => 80,
@@ -809,7 +812,7 @@ impl CommandDef {
             match title {
                 "Shell" => match rank {
                     0..=20 => 1,  // New Window, New Tab
-                    21..=26 => 2, // AI Config, Lazygit, Yazi, Remote Files, Command Palette
+                    21..=26 => 2, // AI Config, Lazygit, Yazi, Remote Files, Document Workbench, Command Palette
                     27..=35 => 3, // Split
                     36..=45 => 4, // Close
                     46..=55 => 5, // Launcher
@@ -1623,6 +1626,15 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                     brief: "Remote Files".into(),
                     doc: "Open the current SSH domain in a local Yazi tab".into(),
                     keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "r".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: None,
+                }
+            } else if name == crate::document_workbench::EVENT_NAME {
+                CommandDef {
+                    brief: "Document Workbench".into(),
+                    doc: "Review and edit generated Markdown, HTML, and text documents".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "b".into())],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,
@@ -2621,6 +2633,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         EmitEvent("kaku-launch-lazygit".to_string()),
         EmitEvent("kaku-launch-yazi".to_string()),
         EmitEvent("kaku-open-remote-files".to_string()),
+        EmitEvent(crate::document_workbench::EVENT_NAME.to_string()),
         SplitVertical(SpawnCommand {
             domain: SpawnTabDomain::CurrentPaneDomain,
             ..Default::default()

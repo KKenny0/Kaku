@@ -99,6 +99,7 @@ mod ai_tools;
 mod colorease;
 mod commands;
 mod customglyph;
+pub mod document_workbench;
 mod download;
 mod frontend;
 mod glyphcache;

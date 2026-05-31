@@ -616,6 +616,8 @@ impl crate::TermWindow {
         self.paint_window_borders(&mut layers)
             .context("paint_window_borders")?;
         drop(layers);
+        self.paint_document_workbench()
+            .context("paint_document_workbench")?;
         self.paint_modal().context("paint_modal")?;
         self.paint_toast().context("paint_toast")?;
 

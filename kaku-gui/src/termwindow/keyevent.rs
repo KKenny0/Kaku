@@ -538,6 +538,10 @@ impl super::TermWindow {
             return;
         }
 
+        if self.document_workbench.visible && self.document_workbench.focused {
+            return;
+        }
+
         let pane = match self.get_active_pane_or_overlay() {
             Some(pane) => pane,
             None => return,
@@ -1105,6 +1109,10 @@ impl super::TermWindow {
                     Key::None => {}
                 }
             }
+            return;
+        }
+
+        if self.document_workbench_key_event(&window_key, context) {
             return;
         }
 

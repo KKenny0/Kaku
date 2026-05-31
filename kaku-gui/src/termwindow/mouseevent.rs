@@ -453,7 +453,8 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::DocumentWorkbench(_) => {}
         }
     }
 
@@ -464,7 +465,8 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::DocumentWorkbench(_) => {}
         }
     }
 
@@ -973,6 +975,11 @@ impl super::TermWindow {
             UIItemType::ScrollThumb => {
                 self.drag_scroll_thumb(item, start_event, event, context);
             }
+            UIItemType::DocumentWorkbench(
+                crate::document_workbench::WorkbenchHit::ResizeHandle,
+            ) => {
+                self.drag_document_workbench_resize(item, start_event, event, context);
+            }
             _ => {
                 log::error!("drag not implemented for {:?}", item);
             }
@@ -1006,6 +1013,9 @@ impl super::TermWindow {
             }
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
+            }
+            UIItemType::DocumentWorkbench(hit) => {
+                self.mouse_event_document_workbench(hit, item, pane, event, context);
             }
         }
     }
@@ -1327,6 +1337,10 @@ impl super::TermWindow {
         context: &dyn WindowOps,
         capture_mouse: bool,
     ) {
+        if matches!(event.kind, WMEK::Press(_)) {
+            self.document_workbench_blur();
+        }
+
         let mut is_click_to_focus_pane = false;
 
         let ClickPosition {

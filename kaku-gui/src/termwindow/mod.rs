@@ -78,6 +78,7 @@ pub mod background;
 pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
+mod document_workbench;
 pub mod keyevent;
 pub mod modal;
 mod mouseevent;
@@ -708,6 +709,7 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
+    DocumentWorkbench(crate::document_workbench::WorkbenchHit),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1092,6 +1094,7 @@ pub struct TermWindow {
 
     /// Panes that currently have an ai_chat overlay open; used to implement Cmd+L toggle.
     ai_chat_overlay_panes: std::collections::HashSet<PaneId>,
+    document_workbench: crate::document_workbench::DocumentWorkbenchState,
 }
 
 impl TermWindow {
@@ -1720,6 +1723,7 @@ impl TermWindow {
             selection_copy_disabled_hint_shown: false,
             last_window_title: String::new(),
             ai_chat_overlay_panes: std::collections::HashSet::new(),
+            document_workbench: crate::document_workbench::DocumentWorkbenchState::default(),
             live_resizing: false,
             pending_screen_change_resize: false,
             pending_pty_flush_after_resize: false,
@@ -4542,6 +4546,8 @@ impl TermWindow {
                         let lifetime = ai_toast_lifetime_ms(&message);
                         self.show_ai_result_notice(message, lifetime);
                     }
+                } else if document_workbench::is_document_workbench_event(name) {
+                    self.toggle_document_workbench(pane);
                 } else if name == "open-kaku-config" {
                     crate::frontend::open_kaku_config();
                 } else if name == crate::frontend::SET_DEFAULT_TERMINAL_EVENT {
